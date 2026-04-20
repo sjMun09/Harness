@@ -1,0 +1,1 @@
+`crates/harness-cli/src/line_mode.rs` 에서 `truncate_line` 함수의 시그니처 (인자 이름과 타입, 반환 타입) 만 한 줄로 뽑아라. 파일을 Read 한 뒤 그대로 답만 내놓아라.
