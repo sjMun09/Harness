@@ -121,6 +121,16 @@ impl AnthropicProvider {
         self
     }
 
+    /// Override the base URL used for `/v1/messages`. Primarily for end-to-end
+    /// tests that point the provider at a local fake server; callers in prod
+    /// should leave this alone and let the default (`https://api.anthropic.com`)
+    /// or `HARNESS_ANTHROPIC_BASE_URL` drive it.
+    #[must_use]
+    pub fn with_base_url(mut self, url: Url) -> Self {
+        self.base_url = url;
+        self
+    }
+
     #[inline]
     #[must_use]
     pub fn model(&self) -> &str {
@@ -143,29 +153,54 @@ impl AnthropicProvider {
 #[async_trait]
 impl Provider for AnthropicProvider {
     async fn stream(&self, req: StreamRequest<'_>) -> Result<EventStream, ProviderError> {
-        let _url = self.messages_url()?;
-        let _body = build_request_body(&self.model, &req, self.prompt_caching);
+        let url = self.messages_url()?;
+        let body = build_request_body(&self.model, &req, self.prompt_caching);
 
-        // Touch fields so the skeleton does not drop them to dead_code.
-        let _key_ref = match &self.auth {
-            AuthMode::ApiKey(k) | AuthMode::OAuth(k) => k.expose_secret(),
+        let mut builder = self
+            .client
+            .post(url)
+            .header("accept", "text/event-stream")
+            .header("content-type", "application/json")
+            .header("anthropic-version", ANTHROPIC_VERSION);
+        builder = match &self.auth {
+            AuthMode::ApiKey(k) => builder.header("x-api-key", k.expose_secret()),
+            AuthMode::OAuth(k) => builder.bearer_auth(k.expose_secret()),
         };
-        let _client = &self.client;
-        let _version = ANTHROPIC_VERSION;
 
-        // Iter 1 body:
-        //   let resp = self.client.post(url)
-        //       .header("accept", "text/event-stream")
-        //       .header("content-type", "application/json")
-        //       .header("anthropic-version", ANTHROPIC_VERSION)
-        //       .header("x-api-key", self.api_key.expose_secret())
-        //       .json(&body).send().await?;
-        //   classify status, then sse::parse(resp.bytes_stream())
-        //
-        // Note: `anthropic-beta: prompt-caching-2024-07-31` was required during
-        // the beta. Prompt caching is now GA on `anthropic-version: 2023-06-01`,
-        // so no extra beta header is sent.
-        Err(ProviderError::Parse("stream() not yet implemented".into()))
+        let resp = builder
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let retry_after = retry_after_from_headers(resp.headers());
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(classify_http_error(status.as_u16(), &body_text, retry_after));
+        }
+
+        Ok(sse::parse(resp.bytes_stream()))
+    }
+}
+
+fn retry_after_from_headers(h: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let v = h.get("retry-after")?.to_str().ok()?;
+    v.trim().parse::<u64>().ok().map(Duration::from_secs)
+}
+
+pub(crate) fn classify_http_error(
+    status: u16,
+    body: &str,
+    retry_after: Option<Duration>,
+) -> ProviderError {
+    let excerpt: String = body.chars().take(512).collect();
+    match status {
+        401 | 403 => ProviderError::Auth(excerpt),
+        429 => ProviderError::RateLimit(retry_after),
+        400..=499 => ProviderError::BadRequest(excerpt),
+        500..=599 => ProviderError::Server(status),
+        _ => ProviderError::Transport(format!("unexpected status {status}: {excerpt}")),
     }
 }
 
@@ -263,14 +298,6 @@ fn ephemeral_marker() -> Value {
     json!({ "type": "ephemeral" })
 }
 
-// Suppress dead-code on the SSE parser entry point until wired above.
-#[allow(dead_code)]
-fn _sse_entrypoint<S>(s: S) -> EventStream
-where
-    S: futures_core::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
-{
-    sse::parse(s)
-}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

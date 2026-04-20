@@ -40,7 +40,11 @@ serde_json         = { workspace = true }
 async-trait        = { workspace = true }
 regex              = { workspace = true }
 chrono             = { workspace = true }
+url                = { workspace = true }
 sha2               = "0.10"
 
 [dev-dependencies]
-tempfile = { workspace = true }
+tempfile   = { workspace = true }
+assert_cmd = "2"
+nix        = { workspace = true, features = ["signal"] }
+url        = { workspace = true }

@@ -10,6 +10,7 @@
 //! bytes — NOT parsed here. Turn loop runs `serde_json::from_slice` exactly
 //! once at `content_block_stop`.
 
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -19,6 +20,9 @@ use harness_core::{ContentBlockHeader, ContentDelta, EventStream, ProviderError,
 use harness_proto::{StopReason, Usage};
 use serde::Deserialize;
 
+/// SSE frame size cap — protects against pathological/DoS streams.
+const MAX_FRAME_BYTES: usize = 1 << 20; // 1 MiB
+
 pub(crate) fn parse<S>(inner: S) -> EventStream
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
@@ -26,7 +30,7 @@ where
     Box::pin(SseStream {
         inner: Box::pin(inner),
         buf: BytesMut::with_capacity(8 * 1024),
-        pending_event: None,
+        queue: VecDeque::new(),
         done: false,
     })
 }
@@ -34,7 +38,8 @@ where
 struct SseStream<S> {
     inner: Pin<Box<S>>,
     buf: BytesMut,
-    pending_event: Option<String>,
+    /// Pending events produced by the last frame, drained one per poll.
+    queue: VecDeque<Result<StreamEvent, ProviderError>>,
     done: bool,
 }
 
@@ -44,12 +49,112 @@ where
 {
     type Item = Result<StreamEvent, ProviderError>;
 
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // Iter 1 body: frame scanner + dispatch to parse_frame().
-        // Touch fields so clippy/dead-code stays quiet.
-        let _ = (&self.buf, &self.pending_event, &self.done, &self.inner);
-        Poll::Ready(None)
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = Pin::into_inner(self);
+        loop {
+            if let Some(ev) = this.queue.pop_front() {
+                return Poll::Ready(Some(ev));
+            }
+
+            if let Some(frame) = extract_frame(&mut this.buf) {
+                if frame.len() > MAX_FRAME_BYTES {
+                    this.done = true;
+                    return Poll::Ready(Some(Err(ProviderError::Parse(format!(
+                        "sse frame exceeds {MAX_FRAME_BYTES} bytes"
+                    )))));
+                }
+                match process_frame(&frame) {
+                    Ok(None) => continue,
+                    Ok(Some(ev)) => {
+                        return Poll::Ready(Some(Ok(ev)));
+                    }
+                    Err(e) => {
+                        this.done = true;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                }
+            }
+
+            if this.done {
+                return Poll::Ready(None);
+            }
+
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => {
+                    this.done = true;
+                    if !this.buf.is_empty() {
+                        return Poll::Ready(Some(Err(ProviderError::StreamDropped)));
+                    }
+                    return Poll::Ready(None);
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    this.done = true;
+                    return Poll::Ready(Some(Err(ProviderError::Transport(e.to_string()))));
+                }
+                Poll::Ready(Some(Ok(bytes))) => {
+                    this.buf.extend_from_slice(&bytes);
+                }
+            }
+        }
     }
+}
+
+fn extract_frame(buf: &mut BytesMut) -> Option<String> {
+    let (end, sep_len) = find_frame_end(buf)?;
+    let frame_bytes = buf.split_to(end + sep_len);
+    let body_len = frame_bytes.len() - sep_len;
+    Some(String::from_utf8_lossy(&frame_bytes[..body_len]).into_owned())
+}
+
+fn find_frame_end(haystack: &[u8]) -> Option<(usize, usize)> {
+    if let Some(i) = haystack.windows(4).position(|w| w == b"\r\n\r\n") {
+        return Some((i, 4));
+    }
+    haystack.windows(2).position(|w| w == b"\n\n").map(|i| (i, 2))
+}
+
+/// Parse a complete SSE frame (without the terminator). Returns:
+///   * `Ok(None)`     — comment/keep-alive frame; caller should continue.
+///   * `Ok(Some(ev))` — one StreamEvent to emit.
+///   * `Err(_)`       — parse error; terminate stream.
+///
+/// Anthropic's SSE frames carry exactly one `event:` + `data:` pair per frame.
+fn process_frame(frame: &str) -> Result<Option<StreamEvent>, ProviderError> {
+    let mut event_name: Option<&str> = None;
+    let mut data: Option<String> = None;
+    for line in frame.split('\n') {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("event:") {
+            event_name = Some(rest.trim_start_matches(' '));
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            let rest = rest.trim_start_matches(' ');
+            match &mut data {
+                Some(d) => {
+                    d.push('\n');
+                    d.push_str(rest);
+                }
+                None => data = Some(rest.to_string()),
+            }
+        }
+    }
+
+    let Some(data) = data else {
+        // Comment-only or empty frame.
+        return Ok(None);
+    };
+    // Anthropic SSE uses an `event:` header naming the variant; but the `type`
+    // field inside `data` is canonical (and OpenAI-style `[DONE]` is tolerated).
+    if data.trim() == "[DONE]" {
+        return Ok(None);
+    }
+    let raw: RawEvent = serde_json::from_str(&data)
+        .map_err(|e| ProviderError::Parse(format!("anthropic sse json: {e}")))?;
+    let _ = event_name; // name is advisory; body's `type` drives dispatch.
+    Ok(Some(map_raw(raw)))
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +235,6 @@ pub(crate) struct ApiError {
 /// Cache metrics: `Usage::{cache_creation,cache_read}_input_tokens` are
 /// extracted automatically because `Usage`'s serde derive accepts them with
 /// `#[serde(default)]` (PLAN §5.2 / iter-2 task #21).
-#[allow(dead_code)]
 fn map_raw(raw: RawEvent) -> StreamEvent {
     match raw {
         RawEvent::MessageStart { message } => StreamEvent::MessageStart {

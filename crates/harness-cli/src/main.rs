@@ -114,6 +114,12 @@ struct Cli {
     #[arg(long, global = true)]
     tui: bool,
 
+    /// Override the provider base URL. Hidden — intended for end-to-end tests
+    /// that point the CLI at a local fake server. Accepts any URL parseable by
+    /// `url::Url`; currently only the Anthropic provider honours the override.
+    #[arg(long, global = true, hide = true)]
+    base_url: Option<String>,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -199,6 +205,7 @@ async fn main() -> ExitCode {
                 cli.auth,
                 cli.trust_cwd,
                 tui,
+                cli.base_url.clone(),
             )
             .await
         }
@@ -217,6 +224,7 @@ async fn main() -> ExitCode {
                     cli.dangerously_skip_permissions,
                     cli.auth,
                     cli.trust_cwd,
+                    cli.base_url.clone(),
                 )
                 .await
             }
@@ -259,6 +267,7 @@ fn init_tracing(verbose: bool) {
         .try_init();
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_ask(
     prompt: String,
     model_override: Option<String>,
@@ -267,6 +276,7 @@ async fn cmd_ask(
     auth: AuthChoice,
     trust_cwd: bool,
     tui: bool,
+    base_url: Option<String>,
 ) -> anyhow::Result<SessionExit> {
     let settings = harness_core::config::load().context("load settings")?;
     let model = pick_model(&settings, model_override.as_deref());
@@ -289,6 +299,7 @@ async fn cmd_ask(
         dangerously_skip_permissions,
         auth,
         trust_cwd,
+        base_url,
     };
 
     if tui {
@@ -324,6 +335,7 @@ struct SessionRun {
     trust_cwd: bool,
     dangerously_skip_permissions: bool,
     auth: AuthChoice,
+    base_url: Option<String>,
 }
 
 async fn run_session_core(run: SessionRun) -> anyhow::Result<SessionExit> {
@@ -338,6 +350,7 @@ async fn run_session_core(run: SessionRun) -> anyhow::Result<SessionExit> {
         dangerously_skip_permissions,
         auth,
         trust_cwd,
+        base_url,
     } = run;
 
     let cwd = std::env::current_dir().context("cwd")?;
@@ -347,7 +360,7 @@ async fn run_session_core(run: SessionRun) -> anyhow::Result<SessionExit> {
         trust::ensure_trusted(&cwd)?;
     }
 
-    let provider: Arc<dyn Provider> = build_provider(&model, auth)?;
+    let provider: Arc<dyn Provider> = build_provider(&model, auth, base_url.as_deref())?;
 
     let tools = harness_tools::all_tools();
 
@@ -501,6 +514,7 @@ async fn run_session_tui(run: SessionRun) -> anyhow::Result<SessionExit> {
         dangerously_skip_permissions,
         auth,
         trust_cwd,
+        base_url,
     } = run;
 
     let cwd = std::env::current_dir().context("cwd")?;
@@ -510,7 +524,7 @@ async fn run_session_tui(run: SessionRun) -> anyhow::Result<SessionExit> {
         trust::ensure_trusted(&cwd)?;
     }
 
-    let provider: Arc<dyn Provider> = build_provider(&model, auth)?;
+    let provider: Arc<dyn Provider> = build_provider(&model, auth, base_url.as_deref())?;
     let tools = harness_tools::all_tools();
 
     let permission = build_permission(&settings, dangerously_skip_permissions);
@@ -684,10 +698,14 @@ async fn run_session_tui(run: SessionRun) -> anyhow::Result<SessionExit> {
 fn build_provider(
     model: &str,
     choice: AuthChoice,
+    base_url: Option<&str>,
 ) -> anyhow::Result<Arc<dyn Provider>> {
     if is_openai_model(model) {
         if matches!(choice, AuthChoice::Oauth) {
             anyhow::bail!("--auth oauth is not supported for OpenAI models; use --auth api-key");
+        }
+        if base_url.is_some() {
+            anyhow::bail!("--base-url is only supported for Anthropic models");
         }
         let model_norm = model.strip_prefix("openai/").unwrap_or(model).to_string();
         eprintln!("[auth] api-key (OPENAI_API_KEY) provider=openai");
@@ -696,7 +714,7 @@ fn build_provider(
         return Ok(Arc::new(p));
     }
 
-    let p = match choice {
+    let mut p = match choice {
         AuthChoice::ApiKey => AnthropicProvider::new(model.to_string())
             .context("build Anthropic provider — is ANTHROPIC_API_KEY set?")?,
         AuthChoice::Oauth => {
@@ -726,6 +744,11 @@ fn build_provider(
             }
         }
     };
+    if let Some(raw) = base_url {
+        let url = url::Url::parse(raw)
+            .with_context(|| format!("parse --base-url value: {raw}"))?;
+        p = p.with_base_url(url);
+    }
     Ok(Arc::new(p))
 }
 
@@ -819,6 +842,7 @@ async fn cmd_session_list() -> anyhow::Result<SessionExit> {
     Ok(SessionExit::Ok)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_session_resume(
     id: String,
     prompt: String,
@@ -827,6 +851,7 @@ async fn cmd_session_resume(
     dangerously_skip_permissions: bool,
     auth: AuthChoice,
     trust_cwd: bool,
+    base_url: Option<String>,
 ) -> anyhow::Result<SessionExit> {
     let sid = SessionId::new(id);
     let session_path = harness_mem::session_path(&sid);
@@ -866,6 +891,7 @@ async fn cmd_session_resume(
         dangerously_skip_permissions,
         auth,
         trust_cwd,
+        base_url,
     })
     .await
 }
