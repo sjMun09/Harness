@@ -680,6 +680,7 @@ dependencies = [
  "globset",
  "harness-perm",
  "harness-proto",
+ "harness-testkit",
  "harness-token",
  "serde",
  "serde_json",
@@ -747,6 +748,19 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "harness-testkit"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "futures-core",
+ "futures-util",
+ "harness-core",
+ "harness-proto",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

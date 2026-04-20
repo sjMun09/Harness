@@ -705,51 +705,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn text_only_terminates() {
-        let events = vec![
-            StreamEvent::MessageStart {
-                message_id: "m".into(),
-                usage: Usage::default(),
-            },
-            StreamEvent::ContentBlockStart {
-                index: 0,
-                block: ContentBlockHeader::Text,
-            },
-            StreamEvent::ContentBlockDelta {
-                index: 0,
-                delta: ContentDelta::Text("hi".into()),
-            },
-            StreamEvent::ContentBlockStop { index: 0 },
-            StreamEvent::MessageDelta {
-                stop_reason: Some(StopReason::EndTurn),
-                usage: Usage::default(),
-            },
-            StreamEvent::MessageStop,
-        ];
-        let provider = mk_provider(vec![events]);
-        let dir = tempfile::tempdir().unwrap();
-        let out = run_turn(
-            EngineInputs {
-                provider,
-                tools: Vec::new(),
-                system: "sys".into(),
-                ctx: mk_ctx(dir.path()),
-                max_turns: 3,
-                plan_gate: PlanGateState::default(),
-                event_sink: None,
-                cancel: None,
-            },
-            vec![Message::user("hello")],
-        )
-        .await
-        .unwrap();
-        assert_eq!(out.len(), 2);
-        match &out[1].content[0] {
-            ContentBlock::Text { text, .. } => assert_eq!(text, "hi"),
-            _ => panic!("expected text"),
-        }
-    }
+    // `text_only_terminates` — migrated to `tests/engine_testkit.rs`
+    // (harness-testkit integration test); it exercises `MockProvider::scripted`.
 
     /// Plan-gate integration: a tool call to a risky path is blocked the first
     /// time, then the model retries and the second call succeeds. Walks both
@@ -1073,46 +1030,8 @@ mod tests {
         (p, tx)
     }
 
-    #[tokio::test]
-    async fn cancel_before_stream_returns_empty_partial() {
-        // Cancel the token before the turn starts — drive_one_turn must return
-        // Cancelled with no partial, never having opened the stream.
-        let (provider, _tx) = mk_chan_provider();
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        let dir = tempfile::tempdir().unwrap();
-
-        let outcome = run_turn_with_outcome(
-            EngineInputs {
-                provider,
-                tools: Vec::new(),
-                system: String::new(),
-                ctx: mk_ctx(dir.path()),
-                max_turns: 3,
-                plan_gate: PlanGateState::default(),
-                event_sink: None,
-                cancel: Some(cancel),
-            },
-            vec![Message::user("hi")],
-        )
-        .await
-        .unwrap();
-
-        match outcome {
-            TurnOutcome::Cancelled {
-                reason,
-                partial_assistant,
-                messages,
-            } => {
-                assert_eq!(reason, CancelReason::UserInterrupt);
-                assert!(partial_assistant.is_none());
-                // Only the original user message — no assistant appended.
-                assert_eq!(messages.len(), 1);
-                assert!(matches!(messages[0].role, Role::User));
-            }
-            TurnOutcome::Completed { .. } => panic!("expected Cancelled, got Completed"),
-        }
-    }
+    // `cancel_before_stream_returns_empty_partial` — migrated to
+    // `tests/engine_testkit.rs`; it exercises `MockProvider::channel`.
 
     #[tokio::test]
     async fn cancel_mid_stream_preserves_finalized_text() {

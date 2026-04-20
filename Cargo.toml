@@ -20,6 +20,7 @@ harness-mem      = { path = "crates/harness-mem",      version = "0.1.0-dev" }
 harness-token    = { path = "crates/harness-token",    version = "0.1.0-dev" }
 harness-perm     = { path = "crates/harness-perm",     version = "0.1.0-dev" }
 harness-tui      = { path = "crates/harness-tui",      version = "0.1.0-dev" }
+harness-testkit  = { path = "crates/harness-testkit",  version = "0.1.0-dev" }
 
 # async / runtime
 tokio        = { version = "1.40", default-features = false }
