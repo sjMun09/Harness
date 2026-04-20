@@ -12,10 +12,13 @@
 //!   6. NTFS ADS `:` mid-component reject (Windows — Unix tolerates `:`
 //!      in names but a `:` never appears in legitimate Unix path segments,
 //!      so this is a no-op in practice and cheap to keep).
-//!
-//! Iter 2 will swap step 2 on Linux with `openat2(RESOLVE_BENEATH |
-//! RESOLVE_NO_SYMLINKS)` and on macOS with `O_NOFOLLOW + fstat` dev/inode
-//! re-check. Both require `unsafe` and/or `rustix`; outside the MVP gate.
+//!   7. Linux-only defense-in-depth backstop: re-open the resolved path (or
+//!      its parent, for not-yet-created targets) via `openat2` with
+//!      `RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH` anchored at the canonical
+//!      root. This closes TOCTOU races where a component is swapped for a
+//!      symlink between the string check and the eventual open. Requires
+//!      Linux 5.6+ for `openat2`; on older kernels or non-Linux this step
+//!      is compiled out.
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -65,7 +68,109 @@ pub fn canonicalize_within(root: &Path, target: &Path) -> Result<PathBuf, PathEr
     }
     reject_symlink_traversal(&normalized, &canonical_root)?;
     check_deny_list(&canonical)?;
+    openat2_verify(&canonical_root, &canonical)?;
     Ok(canonical)
+}
+
+/// Linux-only defense-in-depth: re-resolve the canonical path under the
+/// canonical root using `openat2(RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH)`.
+///
+/// The string-based checks above are primary; this is the backstop for
+/// TOCTOU — if an attacker swaps a component for a symlink between the
+/// check and the caller's open, `openat2` refuses the request atomically
+/// via the kernel resolver. For not-yet-created targets (Write to a new
+/// file) we verify the canonical parent instead, because the tail does not
+/// yet exist on disk.
+///
+/// No-op on non-Linux and on Linux kernels that pre-date `openat2` (5.6).
+#[cfg(target_os = "linux")]
+fn openat2_verify(canonical_root: &Path, canonical: &Path) -> Result<(), PathError> {
+    use rustix::fs::{openat2, Mode, OFlags, ResolveFlags, CWD};
+    use std::io::ErrorKind;
+
+    // Pick the deepest existing path to probe. If the final target doesn't
+    // exist yet (new file), probe its parent — the parent must exist after
+    // `canonicalize_deepest_prefix`. The relative path passed to openat2 is
+    // the suffix *under* canonical_root, since we anchor the dirfd there.
+    let probe: &Path = if canonical.exists() {
+        canonical
+    } else if let Some(parent) = canonical.parent() {
+        if parent.exists() {
+            parent
+        } else {
+            // Nothing to probe — the string checks already vetted the tail.
+            return Ok(());
+        }
+    } else {
+        return Ok(());
+    };
+
+    // Open the canonical root directory; use it as the anchor for RESOLVE_BENEATH.
+    let root_fd = match openat2(
+        CWD,
+        canonical_root,
+        OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(e) if e.raw_os_error() == libc::ENOSYS => {
+            // Kernel < 5.6 lacks openat2 — fall back to string-level checks.
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(PathError::Io(io::Error::from_raw_os_error(e.raw_os_error())));
+        }
+    };
+
+    // Compute the suffix under canonical_root. `strip_prefix` is guaranteed
+    // to succeed because containment was just verified.
+    let rel = probe
+        .strip_prefix(canonical_root)
+        .unwrap_or(Path::new("."));
+    let rel_os = rel.as_os_str();
+    let rel_for_open: &std::ffi::OsStr = if rel_os.is_empty() {
+        std::ffi::OsStr::new(".")
+    } else {
+        rel_os
+    };
+
+    match openat2(
+        &root_fd,
+        rel_for_open,
+        OFlags::PATH | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::NO_SYMLINKS | ResolveFlags::BENEATH,
+    ) {
+        Ok(_fd) => Ok(()),
+        Err(e) => {
+            let code = e.raw_os_error();
+            if code == libc::ENOSYS {
+                // Kernel supports openat, not openat2 with flags — accept.
+                return Ok(());
+            }
+            let io_err = io::Error::from_raw_os_error(code);
+            match io_err.kind() {
+                ErrorKind::PermissionDenied => Err(PathError::Denied(probe.to_path_buf())),
+                _ => {
+                    // ELOOP → symlink encountered; EXDEV → escape outside root.
+                    if code == libc::ELOOP {
+                        Err(PathError::SymlinkBlocked(probe.to_path_buf()))
+                    } else if code == libc::EXDEV {
+                        Err(PathError::Escapes(probe.to_path_buf()))
+                    } else {
+                        Err(PathError::Io(io_err))
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::unnecessary_wraps)]
+fn openat2_verify(_canonical_root: &Path, _canonical: &Path) -> Result<(), PathError> {
+    Ok(())
 }
 
 /// Convenience for parent-then-verify patterns used by `Write`.
@@ -234,5 +339,32 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let err = canonicalize_within(dir.path(), Path::new("link.txt")).unwrap_err();
         assert!(matches!(err, PathError::SymlinkBlocked(_)));
+    }
+
+    /// Defense-in-depth: a symlink pointing *outside* the root must be
+    /// rejected even if we bypass the string-level pre-check and call
+    /// `openat2_verify` directly. This mirrors the TOCTOU scenario where
+    /// a component is swapped between the string check and the open.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn openat2_blocks_symlink_escape() {
+        let outside = tempdir().unwrap();
+        let inside = tempdir().unwrap();
+        let victim = outside.path().join("secret.txt");
+        std::fs::write(&victim, "top-secret").unwrap();
+
+        let link = inside.path().join("evil");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        // Synthesize a "canonical" path that appears to sit under `inside`
+        // but whose final component is actually a symlink escaping the root.
+        let canonical_root = inside.path().canonicalize().unwrap();
+        let fake_canonical = canonical_root.join("evil");
+
+        let err = openat2_verify(&canonical_root, &fake_canonical).unwrap_err();
+        assert!(
+            matches!(err, PathError::SymlinkBlocked(_) | PathError::Escapes(_) | PathError::Denied(_)),
+            "expected SymlinkBlocked/Escapes/Denied, got {err:?}"
+        );
     }
 }

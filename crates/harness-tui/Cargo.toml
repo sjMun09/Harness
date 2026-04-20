@@ -13,9 +13,12 @@ workspace = true
 [dependencies]
 harness-proto = { workspace = true }
 harness-core  = { workspace = true }
+harness-perm  = { workspace = true }
 
 ratatui   = { workspace = true }
 crossterm = { workspace = true }
 tokio     = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 anyhow    = { workspace = true }
 tracing   = { workspace = true }
+futures-core = { workspace = true }
+futures-util = { workspace = true }

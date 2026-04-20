@@ -78,16 +78,71 @@ pub struct Permissions {
     pub ask: Vec<harness_perm::Rule>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HarnessExt {
     #[serde(default = "default_memory_paths")]
     pub memory_paths: Vec<String>,
     #[serde(default)]
     pub subagent_bash_allowed: bool,
+    #[serde(default)]
+    pub plan_gate: PlanGate,
+}
+
+impl Default for HarnessExt {
+    fn default() -> Self {
+        Self {
+            memory_paths: default_memory_paths(),
+            subagent_bash_allowed: false,
+            plan_gate: PlanGate::default(),
+        }
+    }
 }
 
 fn default_memory_paths() -> Vec<String> {
     vec!["HARNESS.md".into(), ".harness/HARNESS.md".into()]
+}
+
+/// PreEdit plan-gate. PLAN §3.2.
+///
+/// Forces the model to emit a written plan before its first Edit/Write to a
+/// risky path (XML/Freemarker/SQL/migrations by default). The first attempt is
+/// blocked with an instructional message; the second attempt to the same path
+/// in the same session passes through.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanGate {
+    #[serde(default = "default_plan_gate_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_plan_gate_patterns")]
+    pub patterns: Vec<String>,
+    #[serde(default = "default_plan_gate_tools")]
+    pub tools: Vec<String>,
+}
+
+impl Default for PlanGate {
+    fn default() -> Self {
+        Self {
+            enabled: default_plan_gate_enabled(),
+            patterns: default_plan_gate_patterns(),
+            tools: default_plan_gate_tools(),
+        }
+    }
+}
+
+fn default_plan_gate_enabled() -> bool {
+    true
+}
+
+fn default_plan_gate_patterns() -> Vec<String> {
+    vec![
+        "**/*.xml".into(),
+        "**/*.ftl".into(),
+        "**/*.sql".into(),
+        "**/migrations/**".into(),
+    ]
+}
+
+fn default_plan_gate_tools() -> Vec<String> {
+    vec!["Edit".into(), "Write".into()]
 }
 
 #[derive(Debug, Error)]
@@ -207,6 +262,7 @@ pub fn merge(mut base: Settings, overlay: Settings) -> Settings {
         base.harness.memory_paths = overlay.harness.memory_paths;
     }
     base.harness.subagent_bash_allowed = overlay.harness.subagent_bash_allowed;
+    base.harness.plan_gate = overlay.harness.plan_gate;
     base
 }
 

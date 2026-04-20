@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 harness-proto = { workspace = true }
 harness-perm  = { workspace = true }
+harness-token = { workspace = true }
 
 tokio       = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process", "io-util", "fs"] }
 tokio-util  = { workspace = true }
@@ -28,6 +29,7 @@ tracing    = { workspace = true }
 etcetera   = { workspace = true }
 bytes      = { workspace = true }
 chrono     = { workspace = true }
+globset    = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

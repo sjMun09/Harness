@@ -8,12 +8,17 @@
 
 #![forbid(unsafe_code)]
 
+pub mod compaction;
 pub mod config;
 pub mod engine;
 pub mod hooks;
+pub mod memory;
+pub mod plan_gate;
 pub mod provider;
+pub mod subagent;
 pub mod tool;
 pub mod turn;
+pub mod tx;
 
 pub use provider::{
     ContentBlockHeader, ContentDelta, EventStream, Provider, ProviderError, StreamEvent,

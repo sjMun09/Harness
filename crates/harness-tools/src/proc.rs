@@ -2,10 +2,47 @@
 //!
 //! On cancel, the turn loop sends `killpg(pgid, SIGTERM)`; if the process
 //! group is still alive `GRACEFUL_SHUTDOWN` later, escalate to SIGKILL.
+//!
+//! Background spawns also opt into Linux `PR_SET_PDEATHSIG = SIGTERM`
+//! (PLAN §3.2 / §8.2) so children die when Harness exits.
 
 use std::time::Duration;
 
 pub const GRACEFUL_SHUTDOWN: Duration = Duration::from_secs(2);
+
+/// Configure a `tokio::process::Command` so the spawned child:
+///   * starts a new session (`setsid`) → fresh pgid we can `killpg` later
+///   * (Linux only) requests `PR_SET_PDEATHSIG = SIGTERM` so the child
+///     dies if Harness exits before reaping it
+///
+/// Safety: `pre_exec` runs after `fork(2)` but before `execve(2)`, in the
+/// child. Only async-signal-safe code may run there. `setsid(2)` and
+/// `prctl(PR_SET_PDEATHSIG)` are both async-signal-safe. No allocation,
+/// no Rust drops.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn configure_session_and_pdeathsig(cmd: &mut tokio::process::Command) {
+    // SAFETY: Only async-signal-safe libc calls below. `setsid(2)` is on
+    // the POSIX async-signal-safe list. `prctl(PR_SET_PDEATHSIG)` is
+    // documented Linux-safe. We allocate / drop nothing inside the closure.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            #[cfg(target_os = "linux")]
+            {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+pub fn configure_session_and_pdeathsig(_cmd: &mut tokio::process::Command) {}
 
 /// Send SIGTERM to a process group. `pgid` is a positive pgid (not negated).
 #[cfg(unix)]

@@ -126,6 +126,10 @@ pub(crate) struct ApiError {
 
 /// Map wire-format `RawEvent` to the flattened `StreamEvent` the turn loop
 /// consumes. **Never parses `partial_json`** — passes raw bytes through.
+///
+/// Cache metrics: `Usage::{cache_creation,cache_read}_input_tokens` are
+/// extracted automatically because `Usage`'s serde derive accepts them with
+/// `#[serde(default)]` (PLAN §5.2 / iter-2 task #21).
 #[allow(dead_code)]
 fn map_raw(raw: RawEvent) -> StreamEvent {
     match raw {
@@ -162,5 +166,79 @@ fn map_raw(raw: RawEvent) -> StreamEvent {
         RawEvent::MessageStop => StreamEvent::MessageStop,
         RawEvent::Ping => StreamEvent::Ping,
         RawEvent::Error { error: _ } => StreamEvent::Ping, // placeholder — iter 1: propagate error
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use harness_proto::Usage;
+
+    #[test]
+    fn message_start_extracts_cache_usage() {
+        // Real Anthropic message_start payload shape (subset).
+        let raw = r#"{
+            "type": "message_start",
+            "message": {
+                "id": "msg_01",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-4-7",
+                "content": [],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                    "input_tokens": 25,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": 512,
+                    "cache_read_input_tokens": 1024
+                }
+            }
+        }"#;
+        let evt: RawEvent = serde_json::from_str(raw).expect("parse message_start");
+        match map_raw(evt) {
+            StreamEvent::MessageStart { usage, .. } => {
+                assert_eq!(usage.input_tokens, 25);
+                assert_eq!(usage.output_tokens, 1);
+                assert_eq!(usage.cache_creation_input_tokens, 512);
+                assert_eq!(usage.cache_read_input_tokens, 1024);
+            }
+            other => panic!("expected MessageStart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_delta_extracts_cache_usage() {
+        let raw = r#"{
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 99,
+                "cache_creation_input_tokens": 64,
+                "cache_read_input_tokens": 128
+            }
+        }"#;
+        let evt: RawEvent = serde_json::from_str(raw).expect("parse message_delta");
+        match map_raw(evt) {
+            StreamEvent::MessageDelta { usage, .. } => {
+                assert_eq!(usage.output_tokens, 99);
+                assert_eq!(usage.cache_creation_input_tokens, 64);
+                assert_eq!(usage.cache_read_input_tokens, 128);
+            }
+            other => panic!("expected MessageDelta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_usage_without_cache_fields_defaults_to_zero() {
+        // Iter-1 Usage payloads that lack the cache_* fields must keep parsing.
+        let raw = r#"{"input_tokens": 7, "output_tokens": 3}"#;
+        let u: Usage = serde_json::from_str(raw).expect("parse legacy Usage");
+        assert_eq!(u.input_tokens, 7);
+        assert_eq!(u.output_tokens, 3);
+        assert_eq!(u.cache_creation_input_tokens, 0);
+        assert_eq!(u.cache_read_input_tokens, 0);
     }
 }

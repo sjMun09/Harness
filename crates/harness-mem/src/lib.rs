@@ -262,6 +262,45 @@ fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     std::fs::set_permissions(path, perm)
 }
 
+/// Standard event name for the turn-cancelled sidecar `Meta` record. PLAN §3.2
+/// (TaskStop). The marker is appended **after** the partial assistant `Message`
+/// has been written, so a session reader can pair them by line adjacency: any
+/// cancelled-message is the line immediately preceding a `cancelled` Meta record.
+pub const META_EVENT_CANCELLED: &str = "cancelled";
+
+/// User-facing reason strings written into the cancelled Meta detail. Mirrors
+/// `harness_core::CancelReason`. We keep the mapping here so `harness-mem` does
+/// not depend on `harness-core`.
+pub const CANCEL_REASON_USER_INTERRUPT: &str = "user_interrupt";
+pub const CANCEL_REASON_TIMEOUT: &str = "timeout";
+pub const CANCEL_REASON_INTERNAL: &str = "internal";
+
+/// Append the partial assistant message + a `cancelled` sidecar Meta record.
+/// PLAN §3.2 — a sidecar is used instead of mutating `Message` so the
+/// `harness-proto` wire schema does not need to bump. Resume readers detect a
+/// cancellation by matching a `cancelled` Meta line to its preceding Message.
+pub async fn append_cancelled_turn(
+    path: &Path,
+    partial_assistant: Option<&Message>,
+    reason: &str,
+) -> Result<(), MemError> {
+    if let Some(msg) = partial_assistant {
+        append(path, &Record::Message(msg.clone())).await?;
+    }
+    append(
+        path,
+        &Record::Meta(Meta {
+            event: META_EVENT_CANCELLED.into(),
+            detail: serde_json::json!({
+                "reason": reason,
+                "ts": chrono::Utc::now().to_rfc3339(),
+            }),
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
 /// Mint a fresh session id — ISO8601 + 8 hex chars of process-local entropy.
 #[must_use]
 pub fn new_session_id() -> SessionId {
@@ -355,5 +394,54 @@ mod tests {
         assert!(!depth_exceeds(shallow, 64));
         let deep = "{".repeat(100) + &"}".repeat(100);
         assert!(depth_exceeds(&deep, 64));
+    }
+
+    #[tokio::test]
+    async fn cancelled_marker_appended_after_partial_message() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let id = SessionId::new("s-cancel");
+        let header = SessionHeader::new(id, "claude-opus-4-7");
+        init(&path, &header).await.unwrap();
+
+        let partial = Message {
+            role: harness_proto::Role::Assistant,
+            content: vec![harness_proto::ContentBlock::Text {
+                text: "Partial reply".into(),
+                cache_control: None,
+            }],
+            usage: None,
+        };
+        append_cancelled_turn(&path, Some(&partial), CANCEL_REASON_USER_INTERRUPT)
+            .await
+            .unwrap();
+
+        let raw = tokio::fs::read_to_string(&path).await.unwrap();
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines.len(), 3, "expected header + message + cancelled meta");
+        assert!(lines[1].contains("\"role\":\"assistant\""));
+        assert!(lines[1].contains("Partial reply"));
+        assert!(lines[2].contains("\"event\":\"cancelled\""));
+        assert!(lines[2].contains("user_interrupt"));
+
+        let loaded = load(&path).await.unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_marker_without_partial_only_writes_meta() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let id = SessionId::new("s-cancel-empty");
+        let header = SessionHeader::new(id, "claude-opus-4-7");
+        init(&path, &header).await.unwrap();
+
+        append_cancelled_turn(&path, None, CANCEL_REASON_USER_INTERRUPT)
+            .await
+            .unwrap();
+        let raw = tokio::fs::read_to_string(&path).await.unwrap();
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("\"event\":\"cancelled\""));
     }
 }

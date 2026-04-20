@@ -5,7 +5,6 @@
 
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -15,6 +14,8 @@ use harness_perm::PermissionSnapshot;
 use harness_proto::SessionId;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
+
+pub use crate::hooks::HookDispatcher;
 
 /// A tool the model can call. Advertised to the provider via `schema()`,
 /// dispatched by the turn loop per tool_use block.
@@ -83,6 +84,17 @@ pub struct ToolCtx {
     pub cancel: CancellationToken,
     pub permission: PermissionSnapshot,
     pub hooks: HookDispatcher,
+    /// Optional sub-turn host. `None` for tests and binaries that don't wire
+    /// subagent support; `Some` only in top-level CLI runs.
+    pub subagent: crate::subagent::OptHost,
+    /// Current agent nesting depth. `0` = top-level user-facing turn.
+    /// PLAN §5.4 bars depth > `SUBAGENT_MAX_DEPTH` from spawning further subagents.
+    pub depth: u32,
+    /// Optional multi-file rollback transaction (PLAN §3.2). `Some` when the
+    /// top-level CLI has initialized staging; `None` for unit tests and
+    /// binaries that opt out. Subagents inherit the parent's handle so every
+    /// write lands in a single revert point.
+    pub tx: crate::tx::OptTx,
 }
 
 impl ToolCtx {
@@ -99,19 +111,6 @@ const _: fn() = || {
     fn assert_clone_send_static<T: Clone + Send + 'static>() {}
     assert_clone_send_static::<ToolCtx>();
 };
-
-/// Opaque handle to the hook dispatcher (SessionStart/PreToolUse/...).
-/// Cheap-clone via Arc — real impl lands in `crate::hooks`.
-#[derive(Clone, Default)]
-pub struct HookDispatcher {
-    _inner: Arc<()>,
-}
-
-impl std::fmt::Debug for HookDispatcher {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HookDispatcher").finish()
-    }
-}
 
 /// Errors a tool may surface. Wrapped into `ToolResult { is_error: true }`
 /// by the turn loop — never propagated past a single call.

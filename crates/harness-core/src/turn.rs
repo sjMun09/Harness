@@ -72,7 +72,10 @@ impl BlockState {
     /// zero-arg tools).
     pub fn finalize(self) -> Result<ContentBlock, FinalizeError> {
         match self {
-            Self::Text { text_buf } => Ok(ContentBlock::Text { text: text_buf }),
+            Self::Text { text_buf } => Ok(ContentBlock::Text {
+                text: text_buf,
+                cache_control: None,
+            }),
             Self::ToolUse {
                 id,
                 name,
@@ -93,7 +96,12 @@ impl BlockState {
                         tool_name: name,
                     });
                 }
-                Ok(ContentBlock::ToolUse { id, name, input })
+                Ok(ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    cache_control: None,
+                })
             }
         }
     }
