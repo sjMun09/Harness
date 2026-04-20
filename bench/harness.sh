@@ -25,13 +25,13 @@ fi
 prompt=$(cat "$prompt_file")
 
 start=$(now_ms)
-printf '%s\n' "$prompt" | harness ask - >"$stdout_file" 2>"$stderr_file"
+harness ask "$prompt" >"$stdout_file" 2>"$stderr_file"
 exit_code=$?
 end=$(now_ms)
 wall_ms=$((end - start))
 
 assistant_bytes=$(wc -c <"$stdout_file" | tr -d ' ')
-stderr_lines=$(grep -c '^⏺ ' "$stderr_file" 2>/dev/null || echo 0)
+stderr_lines=$(LC_ALL=en_US.UTF-8 grep -c '^⏺ ' "$stderr_file" 2>/dev/null || echo 0)
 
 tokens_in=""
 tokens_out=""

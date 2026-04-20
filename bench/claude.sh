@@ -30,7 +30,7 @@ wall_ms=$((end - start))
 
 assistant_bytes=$(wc -c <"$stdout_file" | tr -d ' ')
 # Claude Code 는 툴 마커 기호가 다를 수 있으므로 근사만. ⏺ 또는 "tool:" 라인.
-stderr_lines=$(grep -cE '^(⏺ |\* tool:)' "$stderr_file" 2>/dev/null || echo 0)
+stderr_lines=$(LC_ALL=en_US.UTF-8 grep -cE '^(⏺ |\* tool:)' "$stderr_file" 2>/dev/null || echo 0)
 
 # Claude Code --print 은 stdout 에 JSON 을 뱉는 모드도 있음. 기본은 텍스트.
 tokens_in=""

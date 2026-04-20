@@ -75,7 +75,7 @@ cd bench/
 
 - 머신: macOS 24.3.0 / M2 Pro / 16GB
 - 네트워크: 유선, api.anthropic.com p50 RTT 38ms
-- 모델: claude-opus-4-5 (양쪽 동일)
+- 모델: claude-opus-4-7 (양쪽 동일)
 - Trials per cell: 3
 
 ## cold_start.txt — "hi 라고만 답해"

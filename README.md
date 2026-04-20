@@ -1,12 +1,77 @@
 # Harness
 
-Rust 로 작성된 **단일 바이너리 코딩 에이전트**. Claude Code 와 동급의 워크플로(분석 → 판단 → 구현 → 테스트 검증)를 제공하되, 시작 속도 · 파일 I/O · grep/glob · tokenize 를 모두 더 빠르게 하고, **레거시 코드베이스 리팩토링**(XML/SQL/Freemarker/MyBatis) 에 특화된 툴을 1급 기능으로 내장한다.
+> **Harness 는 터미널에서 쓰는 코딩 에이전트 CLI 입니다.**
+> iTerm / zsh 같은 터미널 *안에서* `harness ask "..."` 라고 치면,
+> LLM 기반 에이전트가 파일을 읽고 · 검색하고 · 편집하고 · 테스트까지 돌려서
+> 결과를 보고합니다.
 
-- **목표 사용 예**: `harness ask "demandPlan_sql.xml 의 pivot 을 프리마커로 수정해줘"` → 레포 컨벤션 자동 참조 → bucket vs Freemarker 판단 → 구현 → 테스트 실행 → 결과 리포트
-- **적용 범위(도메인 무관)**: 백엔드(SQL XML · Freemarker · MyBatis · Java · Kotlin · Go) · 프론트(React · Vue · CSS) · LLM 작업(프롬프트 · eval)
-- **Non-goal**: Claude Code 의 모든 생태계(skills 마켓플레이스, IDE 확장, 웹 세션) 복제 / 모든 벤더 동등 지원(Anthropic 1급, OpenAI 2급, 나머지 BYO)
+가장 가까운 비교 대상은 Anthropic 의 **Claude Code** (`claude` 명령) 입니다.
+Harness 는 같은 워크플로 (분석 → 판단 → 구현 → 테스트 검증) 를 제공하되,
+두 가지 목표로 다시 쓴 Rust 재구현입니다.
 
-전체 설계 계약은 [`PLAN.md`](PLAN.md) 에 v3 기준으로 기재되어 있다. 이 문서는 **지금 어떤 기능이 있고 어떻게 쓰는지** 에 집중한다.
+1. **Rust 단일 정적 바이너리** — 시작 속도, 파일 I/O, grep / glob, tokenize 가 네이티브 속도. Node 런타임 부트스트랩 비용이 없습니다.
+2. **레거시 백엔드 리팩토링 1 급 지원** — XML · SQL · Freemarker · MyBatis 매퍼 체인 분석, 동적 SQL 동치성 검증, 템플릿 렌더 비교를 내장 툴로 제공합니다.
+
+설계 세부는 [`PLAN.md`](PLAN.md) (v3 기준) 에 있고, 이 문서는
+**지금 어떤 기능이 있고 어떻게 쓰는지** 에 집중합니다.
+
+---
+
+## 이거, 정확히 뭔가요?
+
+한 줄로 헷갈림을 줄이기 위한 정리입니다.
+
+| 질문 | 답 |
+|---|---|
+| 터미널 에뮬레이터인가요? (iTerm · Alacritty 같은) | **아니요.** |
+| 쉘인가요? (bash · zsh 같은) | **아니요.** |
+| 터미널 멀티플렉서인가요? (tmux · zellij · cmux 같은) | **아니요.** |
+| 그럼 뭔가요? | **CLI 프로그램입니다.** 여러분이 평소 쓰는 터미널 안에서 `harness ask "..."` 라고 치면, 에이전트가 코드베이스를 분석·수정·검증해 줍니다. |
+| Claude Code (`claude`) 와 같은 카테고리인가요? | **네, 직접 대체재입니다.** 아래 "Claude Code 와의 비교" 참고. |
+
+---
+
+## 만든 계기
+
+1. **레거시 코드베이스를 Claude Code 로 다루기가 불편했습니다.**
+   대형 SQL-XML · Freemarker · MyBatis 매퍼 체인을 리팩토링하려면
+   include 그래프 추적, 동적 SQL 분기 동치성 검증, 렌더 결과 비교 같은
+   도메인 특화 툴이 필요한데, 범용 에이전트는 매번 ad-hoc grep + `cat` +
+   수작업으로 그 간극을 메워야 했습니다.
+
+2. **콜드 스타트가 느렸습니다.**
+   Node 기반 CLI 는 한 줄 질의에도 수 초의 부트스트랩이 발생합니다.
+   짧은 질의의 왕복 비용을 줄이려면 런타임 부트스트랩이 없어야 했습니다.
+
+3. **단일 바이너리 + 내부 구조 소유권.**
+   권한 시스템 · plan-gate · 롤백 · 백그라운드 bash · 컨벤션 주입 훅 —
+   전부 기존 Claude Code 의 계약(권한 문법, 훅 이벤트, `settings.json` 포맷) 을
+   최대한 호환하면서도 제 환경에 맞게 조일 수 있어야 했습니다.
+
+그래서 외부 인터페이스는 Claude Code 와 최대한 호환으로 두고,
+내부만 Rust 로 새로 썼습니다.
+
+---
+
+## 목표 사용 예
+
+```bash
+harness ask "demandPlan_sql.xml 의 pivot 을 프리마커로 수정해줘"
+```
+
+위 한 줄이 다음 흐름으로 동작합니다.
+
+- 레포 컨벤션(HARNESS.md · sibling 파일) 자동 참조
+- bucket pattern vs Freemarker 분기 판단
+- 실제 수정 → `DiffExec` 으로 before / after 렌더 비교
+- 테스트 실행 → 결과 리포트
+
+적용 범위는 도메인 무관 — 백엔드 (SQL XML · Freemarker · MyBatis · Java · Kotlin · Go),
+프론트 (React · Vue · CSS), LLM 작업 (프롬프트 · eval) 모두 가능합니다.
+
+**Non-goal**: Claude Code 의 모든 생태계를 복제하지 않습니다
+(skills 마켓플레이스 · IDE 확장 · 웹 세션 X, MCP 서버 미지원).
+벤더는 Anthropic 1 급, OpenAI 2 급, 나머지는 BYO 입니다.
 
 ---
 
@@ -52,8 +117,21 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # 한 번의 질문-응답 턴
 harness ask "이 레포에 있는 TODO 를 모아서 리포트해줘"
 
-# 모델 지정 (기본: claude-opus-4-5 계열)
+# 모델 지정 (기본: claude-opus-4-7)
 harness --model claude-sonnet-4-6 ask "이 파일 구조 설명해줘"
+
+# 프롬프트를 파일로 관리 (길어서 셸 한 줄에 안 들어갈 때)
+harness ask "$(cat prompts/refactor.md)"
+
+# TUI 로 실행 (대화창 + 툴 패널) — 빌드 시 --features tui 필요
+harness --tui ask "이 레포 구조 설명해줘"
+
+# 이전 세션 이어가기
+harness session list                # 최근 세션 id 확인
+harness session resume a1b2c3 "위 분석 기반으로 수정까지 진행해줘"
+
+# Claude Code 에서 쓰던 권한 설정 가져오기 (allow → ask 로 자동 다운그레이드)
+harness config import
 ```
 
 예상 출력(라인 모드):
@@ -112,15 +190,29 @@ Harness 는 Claude Code 를 대체하려는 게 아니라 **특정 사용 결을
 
 ## CLI 레퍼런스
 
+### 전체 문법
+
+```
+harness  [전역옵션]  <서브커맨드>  [서브옵션]  "프롬프트"
+```
+
+- **`harness`** — 바이너리 이름. 필수.
+- **전역옵션** — 모든 서브커맨드에서 동작. 내부적으로 clap `global = true` 라서 서브커맨드 앞/뒤 어디에 와도 됩니다 (`harness --model X ask "..."` 와 `harness ask "..." --model X` 둘 다 가능).
+- **서브커맨드** — `ask` / `session` / `config` 중 하나. 필수.
+- **서브옵션** — 해당 서브커맨드 전용 옵션(예: `--max-turns`). 반드시 서브커맨드 뒤에.
+- **프롬프트** — 여러분이 시키고 싶은 자연어 지시. 한 단어짜리 "hi" 부터, 여러 줄짜리 `"demandPlan.xml 의 pivot 을 Freemarker 로 바꾸고 테스트까지 통과시켜"` 같은 구체적 요구까지 전부 가능. 공백 포함 시 반드시 따옴표로 감쌉니다.
+
 ### 전역 옵션
 
 | 플래그 | 설명 |
 |---|---|
-| `--model <NAME>` | 사용할 모델. `HARNESS_MODEL` env 또는 `settings.json` 의 `model` 과 precedence 동일. |
-| `--verbose / -v` | DEBUG tracing 활성화. stderr 에 `[warn]` 배너 표시. |
+| `--model <NAME>` | 사용할 모델. `HARNESS_MODEL` env 또는 `settings.json` 의 `model` 과 precedence 동일. 기본값 `claude-opus-4-7`. |
+| `--auth auto\|api-key\|oauth` | 자격증명 선택. `auto` 는 `ANTHROPIC_API_KEY` → Claude Code 키체인 순서로 폴백. |
+| `--tui` *(feature=tui 빌드 시)* | ratatui 기반 TUI 모달로 실행 (라인 모드 stderr 대신). 현재 `ask` 만 지원. |
+| `--verbose` / `-v` | DEBUG tracing 활성화. stderr 에 `[warn]` 배너 표시. |
 | `--dangerously-skip-permissions` | 모든 Ask 권한 요청을 자동 Allow 처리. CI 에서 의도적으로 쓸 때만 사용. |
-| `--auth auto|api-key|oauth` | 자격증명 선택. `auto` 는 `ANTHROPIC_API_KEY` → Claude Code 키체인 순서로 폴백. |
 | `--trust-cwd` | 첫 로드 cwd 트러스트 프롬프트(§8.2) 생략. 비대화식 환경 전용. |
+| `--base-url <URL>` | (숨김·테스트용) Anthropic 프로바이더 base URL 오버라이드. 로컬 fake 서버 E2E 테스트에서 사용. |
 
 ### 서브커맨드
 
@@ -128,14 +220,24 @@ Harness 는 Claude Code 를 대체하려는 게 아니라 **특정 사용 결을
 
 ```bash
 harness ask "<prompt>" [--max-turns 20]
+harness ask -           < prompt.txt     # stdin 에서 읽기 (hyphen sentinel)
+cat prompt.txt | harness ask             # stdin 이 TTY 가 아니면 자동 감지
 ```
 
-- `prompt` 를 user 메시지로 모델에 전달
-- assistant 가 툴을 호출하면 실행 → 결과를 다시 넣음 → `end_turn` 또는 `max_turns` 까지 반복
-- `Ctrl-C` 한 번: 현재 진행 중 tool 취소 + 마지막까지 받은 partial assistant 텍스트 보존 후 exit code 130 반환
-- `Ctrl-C` 두 번: 쉘 SIGINT 로 즉시 종료
+**서브옵션**
 
-세션은 자동으로 `$XDG_STATE_HOME/harness/sessions/<id>.jsonl` 에 저장된다(다음 섹션 `session` 참조).
+| 플래그 | 기본값 | 설명 |
+|---|---|---|
+| `--max-turns <N>` | 20 | 턴 루프 상한. assistant ↔ tool 왕복 횟수의 한계. |
+
+**동작**
+
+- `prompt` 를 user 메시지로 모델에 전달 (자유 형식 — 짧은 질문부터 여러 줄 지시까지 가능).
+- assistant 가 툴을 호출하면 실행 → 결과를 다시 넣음 → `end_turn` 또는 `max_turns` 까지 반복.
+- `Ctrl-C` 한 번: 현재 진행 중 tool 취소 + 마지막까지 받은 partial assistant 텍스트 보존 후 exit code 130 반환.
+- `Ctrl-C` 두 번: 쉘 SIGINT 로 즉시 종료.
+
+세션은 자동으로 `$XDG_STATE_HOME/harness/sessions/<id>.jsonl` 에 저장됩니다 (다음 섹션 `session` 참조).
 
 #### `session` — 세션 관리
 
@@ -211,7 +313,7 @@ assistant 가 turn 중에 자연어 + tool_use 블록으로 호출할 수 있는
 ```jsonc
 {
   "version": 1,
-  "model": "claude-opus-4-5",
+  "model": "claude-opus-4-7",
   "max_turns": 20,
   "permissions": {
     "allow": ["Read", "Glob(**)"],
