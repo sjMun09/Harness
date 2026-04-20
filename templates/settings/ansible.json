@@ -1,0 +1,70 @@
+{
+  "v": 1,
+  "_comment": "Ansible template (dynamos-ansible, vault-heavy). ansible-vault and ansible-playbook default to ask; inventory/config reads are allow. No 'allow' for ansible-playbook because it mutates remote hosts. Note: vault.yml + secrets/** are already denied for Read in the base — which means the LLM cannot even inspect encrypted content; that is INTENTIONAL (secrets blocked).",
+  "model": "claude-opus-4-7",
+  "provider": "anthropic",
+  "permissions": {
+    "deny": [
+      "Read(**/.env)", "Read(**/.env.*)", "Read(**/*.pem)", "Read(**/*.key)",
+      "Read(**/.ssh/**)", "Read(**/credentials.json)", "Read(**/vault.yml)",
+      "Read(**/vault/**)", "Read(**/secrets/**)",
+      "Read(**/*vault*.yml)",
+      "Read(**/*vault*.yaml)",
+      "Write(**/.env)", "Write(**/.env.*)", "Write(**/*.pem)", "Write(**/*.key)",
+      "Write(**/.ssh/**)", "Write(**/credentials.json)",
+      "Write(**/vault.yml)", "Write(**/vault/**)",
+      "Edit(**/.env)", "Edit(**/.env.*)", "Edit(**/*.pem)", "Edit(**/*.key)",
+      "Edit(**/.ssh/**)", "Edit(**/credentials.json)",
+      "Edit(**/vault.yml)", "Edit(**/vault/**)",
+      "Bash(git push)", "Bash(git push --force)", "Bash(git push -f)",
+      "Bash(git push origin main)", "Bash(git push origin dev)", "Bash(git push origin qa)",
+      "Bash(git push origin HEAD:main)", "Bash(git push origin HEAD:dev)", "Bash(git push origin HEAD:qa)",
+      "Bash(ansible-vault rekey)"
+    ],
+    "allow": [
+      "Read(**/inventory/**)",
+      "Read(**/hosts)",
+      "Read(**/ansible.cfg)",
+      "Read(**/*.yml)",
+      "Read(**/*.yaml)",
+      "Read(**/*.j2)",
+      "Glob(**)", "Grep(**)",
+      "Bash(ls)", "Bash(pwd)", "Bash(cat)", "Bash(head)", "Bash(tail)", "Bash(wc)",
+      "Bash(file)", "Bash(stat)", "Bash(tree)",
+      "Bash(git status)", "Bash(git log)", "Bash(git diff)", "Bash(git show)",
+      "Bash(git branch)", "Bash(git blame)", "Bash(git remote)", "Bash(git fetch)",
+      "Bash(git rev-parse)", "Bash(git ls-files)",
+      "Bash(gh pr create)", "Bash(gh pr view)", "Bash(gh pr list)", "Bash(gh pr checks)",
+      "Bash(gh issue list)", "Bash(gh issue view)",
+      "Bash(ansible-playbook --syntax-check)",
+      "Bash(ansible-playbook --list-hosts)",
+      "Bash(ansible-playbook --list-tasks)",
+      "Bash(ansible-playbook --check)",
+      "Bash(ansible-inventory --list)",
+      "Bash(ansible-inventory --graph)",
+      "Bash(ansible-lint)",
+      "Bash(ansible --version)",
+      "Bash(ansible-vault view)"
+    ],
+    "ask": [
+      "Write(**)", "Edit(**)",
+      "Bash(scp)", "Bash(rsync)", "Bash(ssh)", "Bash(sftp)",
+      "Bash(rm)", "Bash(mv)", "Bash(cp)", "Bash(chmod)", "Bash(chown)", "Bash(sudo)",
+      "Bash(ansible-playbook)",
+      "Bash(ansible)",
+      "Bash(ansible-vault encrypt)",
+      "Bash(ansible-vault decrypt)",
+      "Bash(ansible-vault edit)",
+      "Bash(ansible-vault create)",
+      "Bash(ansible-galaxy install)",
+      "Bash(ansible-galaxy collection install)"
+    ]
+  },
+  "harness": {
+    "plan_gate": {
+      "enabled": true,
+      "patterns": ["**/*.yml", "**/*.yaml", "**/*.j2", "**/playbooks/**", "**/roles/**"],
+      "tools": ["Edit", "Write"]
+    }
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "v": 1,
+  "_comment_repo": "plpgsql template (dynamos-db migrations, dynamos-deploy, main branch).",
+  "_comment_policy": "harness-perm (crates/harness-perm/src/lib.rs) supports SINGLE-ASK only: a rule fires either Allow / Ask / Deny. 'Ask twice' requires a second confirmation step. We implement it with a PreToolUse HOOK (crates/harness-core/src/hooks.rs HookEvent::PreToolUse). The hook is run AFTER the permission bucket returns Ask and the user approves; it receives the tool-call JSON on stdin and can emit {\"action\":\"block\",\"reason\":\"...\"} to force a second interactive confirmation outside the permission system. Deploy the companion script to scripts/harness-dbwrite-guard.sh in the target repo (template provided in templates/settings/hooks/dbwrite_guard.sh).",
+  "_comment_shlex": "Bash shlex-prefix matcher: Bash(psql -c) matches 'psql -c \"INSERT ...\"' because shlex tokenizes -c and the quoted SQL as two tokens. We cannot pattern-match SQL verbs inside the -c string — only the hook can inspect the full command string for INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE.",
+  "model": "claude-opus-4-7",
+  "provider": "anthropic",
+  "permissions": {
+    "deny": [
+      "Read(**/.env)", "Read(**/.env.*)", "Read(**/*.pem)", "Read(**/*.key)",
+      "Read(**/.ssh/**)", "Read(**/credentials.json)", "Read(**/vault.yml)",
+      "Read(**/vault/**)", "Read(**/secrets/**)",
+      "Write(**/.env)", "Write(**/.env.*)", "Write(**/*.pem)", "Write(**/*.key)",
+      "Write(**/.ssh/**)", "Write(**/credentials.json)",
+      "Edit(**/.env)", "Edit(**/.env.*)", "Edit(**/*.pem)", "Edit(**/*.key)",
+      "Edit(**/.ssh/**)", "Edit(**/credentials.json)",
+      "Bash(git push)", "Bash(git push --force)", "Bash(git push -f)",
+      "Bash(git push origin main)", "Bash(git push origin dev)", "Bash(git push origin qa)",
+      "Bash(git push origin HEAD:main)", "Bash(git push origin HEAD:dev)", "Bash(git push origin HEAD:qa)",
+      "Bash(dropdb)",
+      "Bash(pg_dropcluster)"
+    ],
+    "allow": [
+      "Read(**)", "Glob(**)", "Grep(**)",
+      "Bash(ls)", "Bash(pwd)", "Bash(cat)", "Bash(head)", "Bash(tail)", "Bash(wc)",
+      "Bash(file)", "Bash(stat)", "Bash(tree)",
+      "Bash(git status)", "Bash(git log)", "Bash(git diff)", "Bash(git show)",
+      "Bash(git branch)", "Bash(git blame)", "Bash(git remote)", "Bash(git fetch)",
+      "Bash(git rev-parse)", "Bash(git ls-files)",
+      "Bash(gh pr create)", "Bash(gh pr view)", "Bash(gh pr list)", "Bash(gh pr checks)",
+      "Bash(gh issue list)", "Bash(gh issue view)",
+      "Bash(psql --version)",
+      "Bash(psql -l)",
+      "Bash(psql --list)",
+      "Bash(pg_dump --help)",
+      "Bash(mysql --version)",
+      "Bash(mysqldump --help)"
+    ],
+    "_comment_ask": "All psql/mysql invocations route through the PreToolUse hook. The hook inspects the full command, and if it contains a write verb (INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE/GRANT/REVOKE/CREATE/REPLACE) it BLOCKS with an explanatory reason, forcing the operator to reissue the command after manual re-confirmation (effectively a second ask).",
+    "ask": [
+      "Write(**)", "Edit(**)",
+      "Bash(scp)", "Bash(rsync)", "Bash(ssh)", "Bash(sftp)",
+      "Bash(rm)", "Bash(mv)", "Bash(cp)", "Bash(chmod)", "Bash(chown)", "Bash(sudo)",
+      "Bash(psql)",
+      "Bash(mysql)",
+      "Bash(pg_dump)",
+      "Bash(mysqldump)",
+      "Bash(pg_restore)",
+      "Bash(createdb)",
+      "Bash(createuser)"
+    ]
+  },
+  "hooks": {
+    "pre_tool_use": [
+      {
+        "_comment": "DB double-confirm: after the 'ask' bucket approval, this hook inspects the bash command and blocks psql/mysql DML/DDL so the operator must re-issue + re-approve. This is the second confirmation step. See templates/settings/hooks/dbwrite_guard.sh.",
+        "event": "pre_tool_use",
+        "command": "bash scripts/harness-dbwrite-guard.sh",
+        "timeout_ms": 5000,
+        "on_timeout": "deny"
+      }
+    ]
+  },
+  "harness": {
+    "plan_gate": {
+      "enabled": true,
+      "patterns": ["**/*.sql", "**/migrations/**", "**/*.ddl"],
+      "tools": ["Edit", "Write"]
+    }
+  }
+}

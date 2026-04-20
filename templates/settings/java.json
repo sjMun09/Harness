@@ -1,0 +1,63 @@
+{
+  "v": 1,
+  "_comment": "Java template (dynamos-back, Spring+Maven, dev branch). Base rules inlined; Maven/Gradle build rules added. 'mvn test' and 'mvn compile' allow, 'mvn deploy' and 'mvn release:' deny — they would publish artefacts. Note: Bash shlex-prefix means Bash(mvn deploy) matches 'mvn deploy -DskipTests' too, which is intended.",
+  "model": "claude-opus-4-7",
+  "provider": "anthropic",
+  "permissions": {
+    "deny": [
+      "Read(**/.env)", "Read(**/.env.*)", "Read(**/*.pem)", "Read(**/*.key)",
+      "Read(**/.ssh/**)", "Read(**/credentials.json)", "Read(**/vault.yml)",
+      "Read(**/vault/**)", "Read(**/secrets/**)",
+      "Write(**/.env)", "Write(**/.env.*)", "Write(**/*.pem)", "Write(**/*.key)",
+      "Write(**/.ssh/**)", "Write(**/credentials.json)",
+      "Edit(**/.env)", "Edit(**/.env.*)", "Edit(**/*.pem)", "Edit(**/*.key)",
+      "Edit(**/.ssh/**)", "Edit(**/credentials.json)",
+      "Bash(git push)", "Bash(git push --force)", "Bash(git push -f)",
+      "Bash(git push origin main)", "Bash(git push origin dev)", "Bash(git push origin qa)",
+      "Bash(git push origin HEAD:main)", "Bash(git push origin HEAD:dev)", "Bash(git push origin HEAD:qa)",
+      "Bash(mvn deploy)",
+      "Bash(mvn release:prepare)",
+      "Bash(mvn release:perform)",
+      "Bash(gradle publish)",
+      "Bash(./gradlew publish)"
+    ],
+    "allow": [
+      "Read(**)", "Glob(**)", "Grep(**)",
+      "Bash(ls)", "Bash(pwd)", "Bash(cat)", "Bash(head)", "Bash(tail)", "Bash(wc)",
+      "Bash(file)", "Bash(stat)", "Bash(tree)",
+      "Bash(git status)", "Bash(git log)", "Bash(git diff)", "Bash(git show)",
+      "Bash(git branch)", "Bash(git blame)", "Bash(git remote)", "Bash(git fetch)",
+      "Bash(git rev-parse)", "Bash(git ls-files)",
+      "Bash(gh pr create)", "Bash(gh pr view)", "Bash(gh pr list)", "Bash(gh pr checks)",
+      "Bash(gh issue list)", "Bash(gh issue view)",
+      "Bash(mvn test)",
+      "Bash(mvn compile)",
+      "Bash(mvn clean)",
+      "Bash(mvn verify)",
+      "Bash(mvn validate)",
+      "Bash(mvn dependency:tree)",
+      "Bash(mvn help:effective-pom)",
+      "Bash(gradle test)",
+      "Bash(gradle build)",
+      "Bash(./gradlew test)",
+      "Bash(./gradlew build)",
+      "Bash(java -version)",
+      "Bash(javac -version)"
+    ],
+    "ask": [
+      "Write(**)", "Edit(**)",
+      "Bash(scp)", "Bash(rsync)", "Bash(ssh)", "Bash(sftp)",
+      "Bash(rm)", "Bash(mv)", "Bash(cp)", "Bash(chmod)", "Bash(chown)", "Bash(sudo)",
+      "Bash(mvn install)",
+      "Bash(mvn package)",
+      "Bash(mvn site)"
+    ]
+  },
+  "harness": {
+    "plan_gate": {
+      "enabled": true,
+      "patterns": ["**/*.xml", "**/*.ftl", "**/*.sql", "**/migrations/**", "**/pom.xml"],
+      "tools": ["Edit", "Write"]
+    }
+  }
+}
