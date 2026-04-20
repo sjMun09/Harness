@@ -8,6 +8,8 @@ mod line_mode;
 mod redact;
 mod subagent_host;
 mod trust;
+#[cfg(feature = "tui")]
+mod tui_bridge;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -106,6 +108,12 @@ struct Cli {
     #[arg(long, global = true)]
     trust_cwd: bool,
 
+    /// Drive the session through the ratatui TUI instead of line-mode stderr.
+    /// Currently only wired for `ask` — `session resume` stays line-mode.
+    #[cfg(feature = "tui")]
+    #[arg(long, global = true)]
+    tui: bool,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -176,6 +184,11 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
 
+    #[cfg(feature = "tui")]
+    let tui = cli.tui;
+    #[cfg(not(feature = "tui"))]
+    let tui = false;
+
     let result = match cli.cmd {
         Cmd::Ask { prompt, max_turns } => {
             cmd_ask(
@@ -185,6 +198,7 @@ async fn main() -> ExitCode {
                 cli.dangerously_skip_permissions,
                 cli.auth,
                 cli.trust_cwd,
+                tui,
             )
             .await
         }
@@ -252,6 +266,7 @@ async fn cmd_ask(
     dangerously_skip_permissions: bool,
     auth: AuthChoice,
     trust_cwd: bool,
+    tui: bool,
 ) -> anyhow::Result<SessionExit> {
     let settings = harness_core::config::load().context("load settings")?;
     let model = pick_model(&settings, model_override.as_deref());
@@ -263,7 +278,7 @@ async fn cmd_ask(
         .await
         .context("init session file")?;
 
-    run_session_core(SessionRun {
+    let run = SessionRun {
         settings,
         model,
         session_id,
@@ -274,8 +289,21 @@ async fn cmd_ask(
         dangerously_skip_permissions,
         auth,
         trust_cwd,
-    })
-    .await
+    };
+
+    if tui {
+        #[cfg(feature = "tui")]
+        {
+            return run_session_tui(run).await;
+        }
+        #[cfg(not(feature = "tui"))]
+        {
+            let _ = run;
+            anyhow::bail!("--tui was requested but this binary was built without the `tui` feature");
+        }
+    }
+
+    run_session_core(run).await
 }
 
 /// Shared assembly for a single `run_turn` invocation.
@@ -445,6 +473,194 @@ async fn run_session_core(run: SessionRun) -> anyhow::Result<SessionExit> {
     // starts fresh. Staged state persists if the process crashes, which is
     // fine — the user can still use git to recover, and a stale staging dir
     // doesn't affect correctness of a fresh tx.
+    if let Err(e) = transaction.commit().await {
+        tracing::warn!(error = %e, "tx commit failed; staging dir may linger");
+    }
+    eprintln!("[session {session_id}]");
+    Ok(session_exit)
+}
+
+/// TUI-mode session driver. Mirrors `run_session_core` assembly, then swaps
+/// the line-mode sink for a `TuiEngineDriver` and runs the engine inside
+/// `TuiApp::run_session`. After the TUI tears down, the final `TurnOutcome`
+/// is read from a shared slot and the transcript is persisted exactly as in
+/// line mode — so `harness session resume` continues to work for sessions
+/// started with `--tui`.
+#[cfg(feature = "tui")]
+async fn run_session_tui(run: SessionRun) -> anyhow::Result<SessionExit> {
+    use harness_tui::TuiApp;
+
+    let SessionRun {
+        settings,
+        model,
+        session_id,
+        session_path,
+        initial,
+        already_persisted,
+        max_turns,
+        dangerously_skip_permissions,
+        auth,
+        trust_cwd,
+    } = run;
+
+    let cwd = std::env::current_dir().context("cwd")?;
+    if trust_cwd {
+        trust::skip_trust_check();
+    } else {
+        trust::ensure_trusted(&cwd)?;
+    }
+
+    let provider: Arc<dyn Provider> = build_provider(&model, auth)?;
+    let tools = harness_tools::all_tools();
+
+    let permission = build_permission(&settings, dangerously_skip_permissions);
+    let hooks = HookDispatcher::from_settings_map(&settings.hooks);
+
+    let memory = load_memory(&settings);
+    let plan_gate =
+        PlanGateState::from_config_with_memory(&settings.harness.plan_gate, Some(memory));
+
+    let transaction = harness_tools::Transaction::open(cwd.clone())
+        .await
+        .context("init rollback transaction")?;
+    let tx_handle: harness_core::tx::OptTx = Some(transaction.as_handle());
+
+    let subagent_host: OptHost = Some(Arc::new(CliSubagentHost::new(
+        provider.clone(),
+        tools.clone(),
+        DEFAULT_SYSTEM_PROMPT.to_string(),
+        hooks.clone(),
+        plan_gate.clone(),
+        cwd.clone(),
+        model.clone(),
+        tx_handle.clone(),
+    )) as Arc<dyn SubagentHost>);
+
+    let cancel = CancellationToken::new();
+    let ctx = ToolCtx {
+        cwd,
+        session_id: session_id.clone(),
+        cancel: cancel.clone(),
+        permission,
+        hooks,
+        subagent: subagent_host,
+        depth: 0,
+        tx: tx_handle,
+    };
+
+    // Mirror line-mode's Ctrl-C watcher. The TUI also lets the user Esc/Ctrl-C
+    // to cancel, and `tui_bridge` wires the TUI cancel flag to the same token
+    // — both paths converge on one cancel.
+    let done = CancellationToken::new();
+    let watcher_cancel = cancel.clone();
+    let watcher_done = done.clone();
+    let watcher = tokio::spawn(async move {
+        tokio::select! {
+            biased;
+            () = watcher_done.cancelled() => {}
+            r = tokio::signal::ctrl_c() => {
+                if r.is_ok() {
+                    watcher_cancel.cancel();
+                }
+            }
+        }
+    });
+
+    // Pre-persist the new tail of `initial` before handing off (same contract
+    // as line mode — ensures an interrupted TUI still leaves a recoverable
+    // session file on disk).
+    for m in initial.iter().skip(already_persisted) {
+        harness_mem::append(&session_path, &Record::Message(m.clone()))
+            .await
+            .context("append user message")?;
+    }
+
+    let initial_len = initial.len();
+    let inputs = EngineInputs {
+        provider,
+        tools: tools.into_iter().map(|t: Arc<dyn Tool>| t).collect(),
+        system: DEFAULT_SYSTEM_PROMPT.to_string(),
+        ctx,
+        max_turns,
+        plan_gate,
+        // event_sink is overwritten by TuiEngineDriver; set to None here.
+        event_sink: None,
+        cancel: Some(cancel.clone()),
+    };
+
+    // Grab the initial prompt text to render in scrollback — the last User
+    // message is the prompt the user just submitted.
+    let prompt_text = initial
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, harness_proto::Role::User))
+        .and_then(|m| {
+            m.content.iter().find_map(|b| match b {
+                ContentBlock::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+        })
+        .unwrap_or_default();
+
+    let outcome_slot = tui_bridge::new_outcome_slot();
+    let driver = tui_bridge::TuiEngineDriver::new(inputs, initial)
+        .with_outcome_slot(outcome_slot.clone());
+
+    let app = TuiApp::new(model.clone(), format!("{session_id}"))?;
+    let run_result = app.run_session(prompt_text, Box::new(driver)).await;
+
+    // Stop the Ctrl-C watcher.
+    done.cancel();
+    let _ = watcher.await;
+
+    if let Err(e) = run_result {
+        // Terminal teardown is handled inside event_loop::run regardless.
+        // Propagate with a transaction commit first.
+        if let Err(te) = transaction.commit().await {
+            tracing::warn!(error = %te, "tx commit failed; staging dir may linger");
+        }
+        return Err(e.context("run_session (tui)"));
+    }
+
+    // Drain the outcome slot populated by the driver.
+    let outcome = outcome_slot
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
+        .ok_or_else(|| anyhow::anyhow!("tui driver did not deliver an outcome"))?
+        .context("run_turn (tui)")?;
+
+    let (final_msgs, session_exit, partial_assistant) = match outcome {
+        TurnOutcome::Completed { messages } => (messages, SessionExit::Ok, None),
+        TurnOutcome::Cancelled {
+            messages,
+            partial_assistant,
+            ..
+        } => (messages, SessionExit::Cancelled, partial_assistant),
+    };
+
+    let persist_upper = if partial_assistant.is_some() {
+        final_msgs.len().saturating_sub(1)
+    } else {
+        final_msgs.len()
+    };
+    for m in final_msgs.iter().take(persist_upper).skip(initial_len) {
+        harness_mem::append(&session_path, &Record::Message(m.clone()))
+            .await
+            .context("append message")?;
+    }
+    if matches!(session_exit, SessionExit::Cancelled) {
+        if let Err(e) = harness_mem::append_cancelled_turn(
+            &session_path,
+            partial_assistant.as_ref(),
+            harness_mem::CANCEL_REASON_USER_INTERRUPT,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "failed to persist cancel marker");
+        }
+    }
+
     if let Err(e) = transaction.commit().await {
         tracing::warn!(error = %e, "tx commit failed; staging dir may linger");
     }
