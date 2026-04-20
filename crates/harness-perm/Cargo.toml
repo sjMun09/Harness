@@ -1,0 +1,19 @@
+[package]
+name         = "harness-perm"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Harness permission dispatcher (allow/ask/deny)"
+
+[lints]
+workspace = true
+
+[dependencies]
+harness-proto = { workspace = true }
+globset       = { workspace = true }
+shlex         = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+thiserror     = { workspace = true }

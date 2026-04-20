@@ -1,0 +1,141 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version      = "0.1.0-dev"
+edition      = "2021"
+rust-version = "1.82"
+license      = "MIT OR Apache-2.0"
+repository   = "https://github.com/Munseongjun0/Harness"
+authors      = ["Harness contributors"]
+
+[workspace.dependencies]
+# internal
+harness-proto    = { path = "crates/harness-proto",    version = "0.1.0-dev" }
+harness-core     = { path = "crates/harness-core",     version = "0.1.0-dev" }
+harness-provider = { path = "crates/harness-provider", version = "0.1.0-dev" }
+harness-tools    = { path = "crates/harness-tools",    version = "0.1.0-dev" }
+harness-mem      = { path = "crates/harness-mem",      version = "0.1.0-dev" }
+harness-token    = { path = "crates/harness-token",    version = "0.1.0-dev" }
+harness-perm     = { path = "crates/harness-perm",     version = "0.1.0-dev" }
+harness-tui      = { path = "crates/harness-tui",      version = "0.1.0-dev" }
+
+# async / runtime
+tokio        = { version = "1.40", default-features = false }
+tokio-util   = { version = "0.7", features = ["rt"] }
+async-trait  = "0.1"
+futures      = { version = "0.3", default-features = false, features = ["std"] }
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+bytes        = "1.7"
+
+# errors / logging / time
+thiserror          = "1"
+anyhow             = "1"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+chrono             = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+
+# serde / schema
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars   = "0.8"
+
+# http / retry / secrets
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "stream", "json"] }
+backon  = "1"
+secrecy = "0.10"
+url     = "2"
+
+# cli / tui
+clap      = { version = "4.5", default-features = false, features = ["std", "derive", "help", "usage"] }
+ratatui   = "0.28"
+crossterm = "0.28"
+
+# fs / search / diff
+ignore        = "0.4"
+globset       = "0.4"
+grep-searcher = "0.1"
+grep-regex    = "0.1"
+similar       = "2"
+tempfile      = "3"
+which         = "6"
+shlex         = "1"
+memmap2       = "0.9"
+
+# storage / tokenize / xdg
+redb        = "2"
+fs4         = "0.9"
+etcetera    = "0.8"
+tiktoken-rs = "0.6"
+
+# unix syscalls (linux / bsd)
+libc = "0.2"
+nix  = { version = "0.29", default-features = false }
+
+# optional (iter 2) — re-declared as optional in the crate that uses it
+keyring = { version = "3" }
+
+[workspace.lints.rust]
+unsafe_code                   = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms              = { level = "warn", priority = -1 }
+unreachable_pub               = "allow"
+unused_must_use               = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery  = { level = "allow", priority = -1 }
+# Noise opt-outs (skeleton-friendly; tighten post-iter-1)
+module_name_repetitions  = "allow"
+missing_errors_doc       = "allow"
+missing_panics_doc       = "allow"
+must_use_candidate       = "allow"
+similar_names            = "allow"
+doc_markdown             = "allow"
+return_self_not_must_use = "allow"
+needless_pass_by_value   = "allow"
+items_after_statements   = "allow"
+unreadable_literal       = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss      = "allow"
+cast_sign_loss           = "allow"
+used_underscore_binding  = "allow"
+single_match_else        = "allow"
+unused_async             = "allow"
+missing_fields_in_debug          = "allow"
+default_constructed_unit_structs = "allow"
+match_same_arms                  = "allow"
+unnecessary_literal_bound        = "allow"
+# Tighten selected lints
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro   = "deny"
+todo        = "allow"
+print_stdout = "allow"
+print_stderr = "allow"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links  = "deny"
+private_intra_doc_links = "warn"
+
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+strip         = "debuginfo"
+panic         = "abort"
+debug         = false
+incremental   = false
+
+[profile.release-fast]
+inherits      = "release"
+lto           = "thin"
+codegen-units = 16
+
+[profile.dev]
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 1

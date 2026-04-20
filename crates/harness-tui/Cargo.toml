@@ -1,0 +1,21 @@
+[package]
+name         = "harness-tui"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Harness TUI (ratatui + crossterm). Iter 2."
+
+[lints]
+workspace = true
+
+[dependencies]
+harness-proto = { workspace = true }
+harness-core  = { workspace = true }
+
+ratatui   = { workspace = true }
+crossterm = { workspace = true }
+tokio     = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+anyhow    = { workspace = true }
+tracing   = { workspace = true }

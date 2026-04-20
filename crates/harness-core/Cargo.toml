@@ -1,0 +1,30 @@
+[package]
+name         = "harness-core"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Harness kernel: traits, turn loop, config"
+
+[lints]
+workspace = true
+
+[dependencies]
+harness-proto = { workspace = true }
+harness-perm  = { workspace = true }
+
+tokio       = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process", "io-util", "fs"] }
+tokio-util  = { workspace = true }
+async-trait = { workspace = true }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
+
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+anyhow     = { workspace = true }
+tracing    = { workspace = true }
+etcetera   = { workspace = true }
+bytes      = { workspace = true }
+chrono     = { workspace = true }

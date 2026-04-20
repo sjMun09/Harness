@@ -1,0 +1,44 @@
+[package]
+name         = "harness-tools"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Harness tool implementations (Read/Write/Edit/Bash/Glob/Grep)"
+
+[lints]
+workspace = true
+
+[dependencies]
+harness-proto = { workspace = true }
+harness-core  = { workspace = true }
+harness-perm  = { workspace = true }
+
+tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "time", "sync", "signal"] }
+tokio-util   = { workspace = true }
+async-trait  = { workspace = true }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
+
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+ignore        = { workspace = true }
+globset       = { workspace = true }
+grep-searcher = { workspace = true }
+grep-regex    = { workspace = true }
+similar       = { workspace = true }
+tempfile      = { workspace = true }
+which         = { workspace = true }
+shlex         = { workspace = true }
+memmap2       = { workspace = true }
+
+thiserror = { workspace = true }
+anyhow    = { workspace = true }
+tracing   = { workspace = true }
+bytes     = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+nix  = { workspace = true, features = ["fs", "process", "signal"] }
