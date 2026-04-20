@@ -1,6 +1,6 @@
 {
   "v": 1,
-  "_comment": "TypeScript template (dynamos-front Vite/dev, dynamos-snapshot, jira-claude, packages). pnpm/npm install-family is ask (mutates node_modules + lockfile); test/build/lint/tsc are allow. Shlex-prefix note: Bash(pnpm) alone would match every pnpm subcommand, so we enumerate explicit safe subcommands.",
+  "_comment": "TypeScript / JavaScript template (Vite / Next / Node library \u2014 pnpm, npm, yarn). pnpm|npm|yarn install-family is ask (mutates node_modules + lockfile); test / build / lint / tsc are allow; npx / pnpm dlx / yarn dlx are ask because they download and execute arbitrary npm packages. Shlex-prefix note: Bash(pnpm) alone would match every pnpm subcommand, so we enumerate explicit safe subcommands.",
   "model": "claude-opus-4-7",
   "provider": "anthropic",
   "permissions": {

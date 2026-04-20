@@ -1,6 +1,6 @@
 {
   "v": 1,
-  "_comment": "Python template (dynamos-llm, pytest+venv, main branch). pytest and read-only pip are allow; pip install / uninstall / upgrade are ask because they mutate the venv. Note: Bash(pip install) matches 'pip install -r requirements.txt' via shlex prefix \u2014 intended.",
+  "_comment": "Python template (pytest + venv, pip / poetry / uv). pytest and read-only pip are allow; pip install / uninstall / upgrade, poetry install / add, uv pip sync are ask because they mutate the venv. Note: Bash(pip install) matches 'pip install -r requirements.txt' via shlex prefix \u2014 intended.",
   "model": "claude-opus-4-7",
   "provider": "anthropic",
   "permissions": {

@@ -1,6 +1,6 @@
 {
   "v": 1,
-  "_comment_repo": "plpgsql template (dynamos-db migrations, dynamos-deploy, main branch).",
+  "_comment_repo": "plpgsql template for PostgreSQL / MySQL migration repos.",
   "_comment_policy": "harness-perm (crates/harness-perm/src/lib.rs) supports SINGLE-ASK only: a rule fires either Allow / Ask / Deny. 'Ask twice' requires a second confirmation step. We implement it with a PreToolUse HOOK (crates/harness-core/src/hooks.rs HookEvent::PreToolUse). The hook is run AFTER the permission bucket returns Ask and the user approves; it receives the tool-call JSON on stdin and can emit {\"action\":\"block\",\"reason\":\"...\"} to force a second interactive confirmation outside the permission system. Deploy the companion script to scripts/harness-dbwrite-guard.sh in the target repo (template provided in templates/settings/hooks/dbwrite_guard.sh).",
   "_comment_shlex": "Bash shlex-prefix matcher: Bash(psql -c) matches 'psql -c \"INSERT ...\"' because shlex tokenizes -c and the quoted SQL as two tokens. We cannot pattern-match SQL verbs inside the -c string \u2014 only the hook can inspect the full command string for INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE.",
   "model": "claude-opus-4-7",

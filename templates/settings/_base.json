@@ -1,6 +1,6 @@
 {
   "v": 1,
-  "_comment": "Base policy \u2014 inherited intent for all 12 repos. Harness merges by concatenating rule vectors (see crates/harness-core/src/config.rs merge()), so _base.json is conceptually the 'common rules' that each concrete template ALREADY INCLUDES inline. Do not ship this file to a repo on its own; it is a reference. Key invariants: reads always allow, writes ask, secrets deny, git push deny except via gh pr create, remote-write asks.",
+  "_comment": "Base policy \u2014 inherited intent shared by every language template. Harness merges by concatenating rule vectors (see crates/harness-core/src/config.rs merge()), so _base.json is conceptually the 'common rules' that each concrete template ALREADY INCLUDES inline. Do not ship this file to a repo on its own; it is a reference. Key invariants: reads always allow, writes ask, secrets deny, git push deny except via gh pr create, remote-write asks.",
   "model": "claude-opus-4-7",
   "provider": "anthropic",
   "permissions": {
@@ -144,7 +144,7 @@
     ]
   },
   "hooks": {
-    "_comment": "Layer 2 of the branch-protection stack (see templates/settings/README.md). PreToolUse hook intercepts every Bash(git push) and refuses pushes targeting main/dev/qa. Layer 1 (scripts/git-hooks/pre-push) is client-side git. Layer 3 (templates/github/enforce-pr-only.yml) is a GitHub Actions alarm. All three are needed while runupcompany stays on the Free plan, since server-side Branch Protection / Rulesets APIs are gated behind Team tier.",
+    "_comment": "Layer 2 of the branch-protection stack (see templates/settings/README.md). PreToolUse hook intercepts every Bash(git push) and refuses pushes targeting main/dev/qa. Layer 1 (scripts/git-hooks/pre-push) is client-side git. Layer 3 (templates/github/enforce-pr-only.yml) is a GitHub Actions alarm. All three are needed when server-side Branch Protection / Rulesets APIs are unavailable \u2014 they are gated behind the Team/Enterprise tier for private repos on Free. On Team/Enterprise use a real Ruleset and drop Layer 3.",
     "pre_tool_use": [
       {
         "event": "pre_tool_use",

@@ -1,23 +1,18 @@
 # Harness settings templates
 
-Deployable `.harness/settings.json` templates for the 12 company repos.
+Deployable `.harness/settings.json` templates for rolling the same policy out across many repos (personal, team, or open-source). Pick a template by the repo's primary language.
 
-## Repo → template map
+## Language → template map
 
-| Repo                   | Language / type   | Template            | Branch |
-|------------------------|-------------------|---------------------|--------|
-| dynamos-back           | java (Spring+Mvn) | `java.json`         | dev    |
-| dynamos-llm            | python (pytest)   | `python.json`       | main   |
-| dynamos-front          | typescript (Vite) | `typescript.json`   | dev    |
-| dynamos-snapshot       | typescript        | `typescript.json`   | main   |
-| jira-claude            | typescript        | `typescript.json`   | main   |
-| packages               | typescript (lib)  | `typescript.json`   | main   |
-| dynamos-db             | plpgsql (migr.)   | `plpgsql.json`      | main   |
-| dynamos-deploy         | plpgsql           | `plpgsql.json`      | main   |
-| dynamos-ansible        | ansible-jinja     | `ansible.json`      | main   |
-| dynamosconvert         | javascript (109M) | `generic.json`      | main   |
-| dynamos-configuration  | config            | `generic.json`      | main   |
-| dynamos-monitoring     | config            | `generic.json`      | main   |
+| Language / repo type                       | Template            | Notes |
+|--------------------------------------------|---------------------|-------|
+| Java (Spring, Maven or Gradle)             | `java.json`         | `mvn test|compile|verify` allow; `mvn deploy` / `mvn release:*` / `gradle publish` deny. |
+| Python (pytest, pip / poetry / uv)         | `python.json`       | `pytest` / `python -m pytest` allow; `pip install / uninstall`, `poetry install / add`, `uv pip sync` ask; `twine upload` / `poetry publish` deny. |
+| TypeScript / JavaScript (pnpm, npm, yarn)  | `typescript.json`   | `pnpm|npm|yarn test/lint/typecheck/build` allow; install-family (`pnpm add`, `npm install`, `yarn add`) ask; `npm publish` deny; `npx` / `pnpm dlx` / `yarn dlx` ask. |
+| PL/pgSQL or MySQL migrations               | `plpgsql.json`      | Wraps `psql` / `mysql` with the **ask-twice** `dbwrite_guard.sh` hook — read-only SQL passes; any `INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE/GRANT/REVOKE/CREATE/REPLACE` blocks until re-confirmed. `dropdb` / `pg_dropcluster` deny. |
+| Ansible / Jinja (playbooks, vault-heavy)   | `ansible.json`      | `ansible-playbook --check / --syntax-check`, `ansible-inventory --list / --graph`, `ansible-lint`, `ansible-vault view` allow; `ansible-playbook` / `ansible` / `ansible-vault encrypt|decrypt|edit|create` / `ansible-galaxy install` ask; `ansible-vault rekey` / `ansible-pull` deny. All `vault.yml` / `vault/**` / `*vault*.yml` reads and writes are denied — the LLM can't inspect encrypted material. |
+| Config-heavy / mixed / no language fit     | `generic.json`      | Reads everything, writes/edits ask. Adds `jq` / `yq` / `diff` to allow; `curl -X POST|PUT|DELETE` / `wget` ask. Use this when nothing else fits. |
+| (reference only)                           | `_base.json`        | The common rules that every concrete template already inlines. **Do not ship on its own** — settings merge is concatenation, so copying `_base.json` next to a language template would duplicate every rule. Here for documentation + diffing. |
 
 ## Deploy
 
@@ -57,9 +52,9 @@ cp <harness>/templates/github/enforce-pr-only.yml .github/workflows/
 
 ## Branch protection — 3-layer stack
 
-GitHub server-side branch protection (both classic `branches/*/protection` and the newer Rulesets API) requires a paid Team/Enterprise plan for private repos. `runupcompany` is on Free, so both endpoints return HTTP 403 with `"Upgrade to GitHub Pro or make this repository public to enable this feature."`
+GitHub server-side branch protection (both classic `branches/*/protection` and the newer Rulesets API) requires a paid Team/Enterprise plan for private repos. If your org is on the Free plan, both endpoints return HTTP 403 with `"Upgrade to GitHub Pro or make this repository public to enable this feature."` On the Team/Enterprise tier you don't need Layer 3 at all — use a real Ruleset and skip to the upgrade path below.
 
-Until the org upgrades, we enforce "no direct push to `main`/`dev`/`qa`" via three complementary layers:
+Until the org upgrades (or if you just want a working setup on Free), enforce "no direct push to `main`/`dev`/`qa`" via three complementary layers:
 
 | Layer | File | When it fires | Bypass |
 |---|---|---|---|
@@ -73,7 +68,7 @@ Until the org upgrades, we enforce "no direct push to `main`/`dev`/`qa`" via thr
 
 ### Layer 3 visibility gate — private repos skip it
 
-Every `runupcompany` repo is currently private and the org is on the Free plan. GitHub Actions on private repos draws from the org's **2 000 min/month** free-tier quota (see https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions). The team hasn't been running Actions, and paying for minutes just to enforce a policy that Layers 1 + 2 already catch locally is wasteful. So Layer 3 ships with a visibility gate:
+GitHub Actions on **private** repos draws from the org's **2 000 min/month** free-tier quota (see https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions). If you're on Free and not actively running Actions, burning minutes from that pool just to enforce a policy that Layers 1 + 2 already catch locally is wasteful. So Layer 3 ships with a visibility gate:
 
 ```yaml
 jobs:
@@ -84,14 +79,16 @@ jobs:
 
 Behavior:
 
-- **Private repo** (current state): workflow file exists on disk for self-documenting policy, but the single job is gated `private == false`, so every run skips instantly and costs **0 minutes**.
-- **Public repo** (if ever flipped): the gate evaluates true automatically and the alarm turns on with no additional wiring — no PR, no manual step.
+- **Private repo**: workflow file exists on disk for self-documenting policy, but the single job is gated `private == false`, so every run skips instantly and costs **0 minutes**.
+- **Public repo** (or if the repo is later flipped to public): the gate evaluates true automatically and the alarm turns on with no additional wiring — no PR, no manual step.
 
-If the org upgrades to Team tier we replace Layer 3 with a real Ruleset (next subsection) and delete the workflow entirely.
+If you're **not** on a Free plan (Pro / Team / Enterprise — Actions minutes are included or generous enough that the gate isn't needed), or you want the alarm to fire on private repos too, just delete the `if:` line from `enforce-pr-only.yml`.
 
-### Upgrade path (when runupcompany moves to Team tier)
+When the org upgrades to Team tier, replace Layer 3 with a real Ruleset (next subsection) and delete the workflow entirely.
 
-The equivalent Ruleset that Layers 1-3 approximate, for future `gh api -X POST repos/runupcompany/<repo>/rulesets`:
+### Upgrade path (when your org moves to Team tier)
+
+The equivalent Ruleset that Layers 1-3 approximate, for future `gh api -X POST repos/<ORG>/<repo>/rulesets`:
 
 ```json
 {

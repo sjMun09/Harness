@@ -1,6 +1,6 @@
 {
   "v": 1,
-  "_comment": "Ansible template (dynamos-ansible, vault-heavy). ansible-vault and ansible-playbook default to ask; inventory/config reads are allow. No 'allow' for ansible-playbook because it mutates remote hosts. Note: vault.yml + secrets/** are already denied for Read in the base \u2014 which means the LLM cannot even inspect encrypted content; that is INTENTIONAL (secrets blocked).",
+  "_comment": "Ansible template (playbooks + Jinja, vault-heavy). ansible-vault and ansible-playbook default to ask; inventory / config reads are allow. No 'allow' for ansible-playbook because it mutates remote hosts. Note: vault.yml + secrets/** are already denied for Read in the base \u2014 which means the LLM cannot even inspect encrypted content; that is INTENTIONAL (secrets blocked).",
   "model": "claude-opus-4-7",
   "provider": "anthropic",
   "permissions": {

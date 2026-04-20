@@ -1,6 +1,6 @@
 {
   "v": 1,
-  "_comment": "Generic template for dynamos-configuration, dynamos-monitoring, dynamosconvert (109MB JS), and any repo without a language-specific template. Reads everything, writes/edits ask, secrets deny, git push deny. Appropriate for config-heavy and mixed repos.",
+  "_comment": "Generic template for config-heavy or mixed repos (monitoring configs, deploy manifests, vendored JS, anything without a clean language fit). Reads everything, writes/edits ask, secrets deny, git push routed through the PreToolUse guard (Layer 2). Use this when no language-specific template applies.",
   "model": "claude-opus-4-7",
   "provider": "anthropic",
   "permissions": {

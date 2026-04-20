@@ -6,22 +6,24 @@
 # protected branches is more dangerous than the problem it solves for a
 # solo operator).
 #
-# Visibility gate: this workflow runs ONLY when the repo is PUBLIC.
-# runupcompany's repos are private and on the Free plan — classic Branch
-# Protection and Rulesets API are both 403-gated for private+Free, so
-# Actions is the only server-side option. But Actions on private repos
-# consumes the org's monthly free-minutes quota, and the team hasn't been
-# running Actions, so we gate on `repository.private == false`: if a repo
-# is ever flipped to public, the alarm auto-activates without any
-# additional wiring. For private repos the workflow still exists on disk
-# (self-documenting policy) but every run skips instantly.
+# Visibility gate: by default this workflow runs ONLY when the repo is PUBLIC.
+# Rationale: on GitHub Free, private repos share a 2 000 min/month Actions
+# quota, and classic Branch Protection + the Rulesets API are both 403-gated
+# for private+Free — so Actions is the only server-side enforcement option,
+# but we don't want to burn the quota just to police branch pushes that
+# Layers 1 + 2 (local pre-push hook + Harness PreToolUse guard) already
+# catch. The gate `repository.private == false` means: private repos skip
+# instantly (0 minutes), and if a repo is ever flipped to public the alarm
+# auto-activates without any additional wiring. If your org is NOT on Free
+# (Pro / Team / Enterprise — minutes are included or generous), or you
+# simply want the alarm on private repos too, delete the `if:` line below.
 #
 # Drop this file at `.github/workflows/enforce-pr-only.yml` in any repo
 # you want gated.
 #
-# Upgrade path: when the runupcompany org moves to GitHub Team, replace
+# Upgrade path: when your org moves to GitHub Team / Enterprise, replace
 # this alarm with a proper Branch Protection or Ruleset via
-# `gh api -X PUT repos/.../branches/<branch>/protection` — see
+# `gh api -X PUT repos/<ORG>/<repo>/branches/<branch>/protection` — see
 # templates/settings/README.md §"Upgrade path".
 name: enforce-pr-only
 
