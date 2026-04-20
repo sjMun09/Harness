@@ -19,4 +19,8 @@ serde         = { workspace = true }
 serde_json    = { workspace = true }
 chrono        = { workspace = true }
 thiserror     = { workspace = true }
-tokio         = { workspace = true, features = ["fs", "io-util", "sync"] }
+tokio         = { workspace = true, features = ["fs", "io-util", "sync", "rt"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt", "fs", "io-util"] }

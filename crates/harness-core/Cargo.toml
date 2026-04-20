@@ -28,3 +28,7 @@ tracing    = { workspace = true }
 etcetera   = { workspace = true }
 bytes      = { workspace = true }
 chrono     = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt", "fs", "io-util", "time"] }

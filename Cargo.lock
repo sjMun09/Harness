@@ -626,6 +626,7 @@ dependencies = [
  "harness-proto",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -643,6 +644,7 @@ dependencies = [
  "redb",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
 ]
