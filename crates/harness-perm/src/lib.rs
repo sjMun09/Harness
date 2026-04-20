@@ -226,8 +226,17 @@ impl PermissionSnapshot {
         }
     }
 
-    /// Evaluate — pure, side-effect-free. Session `[a]lways` cache checked first.
+    /// Evaluate — pure, side-effect-free. `deny` rules are always consulted
+    /// before the session `[a]lways` cache so a later-added deny can revoke a
+    /// previously cached allow.
     pub fn evaluate(&self, tool: &str, input: &serde_json::Value) -> Decision {
+        // deny ALWAYS wins — checked before ask_cache so an operator who
+        // accidentally pressed `[a]lways` on a sensitive path can still be
+        // protected by adding a deny rule afterwards.
+        if self.inner.deny.iter().any(|r| r.matches(tool, input)) {
+            return Decision::Deny;
+        }
+
         let key = (tool.to_string(), hash_input(input));
         if self
             .inner
@@ -239,9 +248,6 @@ impl PermissionSnapshot {
             return Decision::Allow;
         }
 
-        if self.inner.deny.iter().any(|r| r.matches(tool, input)) {
-            return Decision::Deny;
-        }
         if self.inner.allow.iter().any(|r| r.matches(tool, input)) {
             return Decision::Allow;
         }
@@ -353,6 +359,21 @@ mod tests {
         assert_eq!(p.evaluate("Edit", &inp), Decision::Ask);
         p.remember_always("Edit", &inp);
         assert_eq!(p.evaluate("Edit", &inp), Decision::Allow);
+    }
+
+    #[test]
+    fn deny_beats_cached_allow() {
+        // Regression: operator whitelists a Read via `[a]lways`, then later
+        // adds a deny rule covering the same path. Deny MUST win.
+        let p = snap(&["Read(**/vault.yml)"], &[], &["Read(**)"]);
+        let inp = json!({"file_path": "/repo/secrets/vault.yml"});
+        // Seed the ask_cache as if the user had pressed `[a]lways`.
+        p.remember_always("Read", &inp);
+        assert_eq!(p.evaluate("Read", &inp), Decision::Deny);
+        // Unrelated paths are unaffected by the deny rule.
+        let other = json!({"file_path": "/repo/README.md"});
+        p.remember_always("Read", &other);
+        assert_eq!(p.evaluate("Read", &other), Decision::Allow);
     }
 
     #[test]
