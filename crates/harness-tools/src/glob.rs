@@ -127,6 +127,7 @@ fn walk_and_match(
         .git_exclude(true)
         .git_global(true)
         .ignore(true)
+        .add_custom_ignore_filename(".harnessignore")
         .follow_links(false)
         .build();
 
@@ -227,6 +228,33 @@ mod tests {
             .await
             .unwrap();
         assert!(out.summary.starts_with("0 matches"));
+    }
+
+    #[tokio::test]
+    async fn harnessignore_excludes_node_modules() {
+        let dir = tempdir().unwrap();
+        tokio::fs::write(dir.path().join(".harnessignore"), "node_modules/\n")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(dir.path().join("node_modules"))
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("node_modules/x.js"), "")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(dir.path().join("src"))
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("src/a.js"), "")
+            .await
+            .unwrap();
+
+        let out = GlobTool
+            .call(serde_json::json!({ "pattern": "**/*.js" }), ctx(dir.path()))
+            .await
+            .unwrap();
+        assert!(out.summary.contains("a.js"));
+        assert!(!out.summary.contains("x.js"));
     }
 
     #[tokio::test]
