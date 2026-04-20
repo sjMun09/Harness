@@ -17,7 +17,7 @@
 #![cfg(not(target_os = "windows"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::process::{Command as StdCommand, Stdio};
 use std::time::Duration;
 
@@ -206,6 +206,139 @@ fn ask_executes_tool_call_then_final_text() {
     assert!(
         stderr.contains("⏺ Read("),
         "expected ⏺ Read(...) marker on stderr, got: {stderr}"
+    );
+
+    rt.block_on(server.shutdown());
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test — `harness ask -` reads the prompt from stdin (hyphen sentinel).
+// ────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ask_reads_prompt_from_stdin_hyphen() {
+    let tmp = TempDir::new().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let (server, addr) =
+        rt.block_on(async { FakeServer::start(vec![Script::text_only("stdin ok")]).await });
+
+    let url = format!("http://{addr}");
+    let mut cmd = harness_cmd(&tmp, &url);
+    cmd.arg("ask").arg("-");
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn harness");
+    {
+        let mut si = child.stdin.take().expect("stdin pipe");
+        si.write_all(b"please explain this long prompt from a file\n")
+            .unwrap();
+    }
+    let output = wait_with_timeout(child);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status={:?} stdout={stdout} stderr={stderr}",
+        output.status
+    );
+    assert!(stdout.contains("stdin ok"), "stdout was: {stdout}");
+
+    rt.block_on(server.shutdown());
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test — `harness ask` with no positional arg auto-reads piped stdin.
+// ────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ask_auto_reads_piped_stdin_without_hyphen() {
+    let tmp = TempDir::new().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let (server, addr) =
+        rt.block_on(async { FakeServer::start(vec![Script::text_only("auto ok")]).await });
+
+    let url = format!("http://{addr}");
+    let mut cmd = harness_cmd(&tmp, &url);
+    cmd.arg("ask");
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn harness");
+    {
+        let mut si = child.stdin.take().expect("stdin pipe");
+        si.write_all(b"auto-detected prompt body\n").unwrap();
+    }
+    let output = wait_with_timeout(child);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status={:?} stdout={stdout} stderr={stderr}",
+        output.status
+    );
+    assert!(stdout.contains("auto ok"), "stdout was: {stdout}");
+
+    rt.block_on(server.shutdown());
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test — `harness ask -` with empty stdin fails with a clear message and does
+// not reach the provider.
+// ────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ask_empty_stdin_errors_out() {
+    let tmp = TempDir::new().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let (server, addr) =
+        rt.block_on(async { FakeServer::start(vec![Script::text_only("unreachable")]).await });
+
+    let url = format!("http://{addr}");
+    let mut cmd = harness_cmd(&tmp, &url);
+    cmd.arg("ask").arg("-");
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn harness");
+    {
+        let mut si = child.stdin.take().expect("stdin pipe");
+        si.write_all(b"   \n\t\n").unwrap();
+    }
+    let output = wait_with_timeout(child);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // anyhow error path maps to ExitCode::FAILURE (=1); verify we are *not*
+    // getting 130 (SIGINT) or any other code by accident.
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "expected exit code 1 (ExitCode::FAILURE), got {:?}; stderr={stderr}",
+        output.status.code()
+    );
+    assert!(
+        stderr.contains("stdin prompt was empty"),
+        "expected stdin-empty error on stderr, got: {stderr}"
     );
 
     rt.block_on(server.shutdown());

@@ -11,6 +11,7 @@ mod trust;
 #[cfg(feature = "tui")]
 mod tui_bridge;
 
+use std::io::{IsTerminal, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -134,9 +135,13 @@ enum AuthChoice {
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Run an agent turn loop on the given prompt.
+    ///
+    /// Pass `-` (or omit when stdin is piped) to read the prompt from stdin:
+    ///   harness ask -            < prompt.txt
+    ///   cat prompt.txt | harness ask
     Ask {
-        /// Prompt text. Quote to include spaces.
-        prompt: String,
+        /// Prompt text. Quote to include spaces. `-` reads from stdin.
+        prompt: Option<String>,
         /// Cap on turn-loop iterations.
         #[arg(long, default_value_t = DEFAULT_MAX_TURNS)]
         max_turns: u32,
@@ -157,8 +162,8 @@ enum SessionCmd {
     Resume {
         /// Session id (stem of the `.jsonl` file, as shown by `session list`).
         id: String,
-        /// New user prompt appended to the loaded transcript.
-        prompt: String,
+        /// New user prompt appended to the loaded transcript. `-` reads from stdin.
+        prompt: Option<String>,
         /// Cap on turn-loop iterations for the resumed run.
         #[arg(long, default_value_t = DEFAULT_MAX_TURNS)]
         max_turns: u32,
@@ -196,38 +201,44 @@ async fn main() -> ExitCode {
     let tui = false;
 
     let result = match cli.cmd {
-        Cmd::Ask { prompt, max_turns } => {
-            cmd_ask(
-                prompt,
-                cli.model,
-                max_turns,
-                cli.dangerously_skip_permissions,
-                cli.auth,
-                cli.trust_cwd,
-                tui,
-                cli.base_url.clone(),
-            )
-            .await
-        }
+        Cmd::Ask { prompt, max_turns } => match resolve_prompt(prompt, "ask").await {
+            Ok(prompt) => {
+                cmd_ask(
+                    prompt,
+                    cli.model,
+                    max_turns,
+                    cli.dangerously_skip_permissions,
+                    cli.auth,
+                    cli.trust_cwd,
+                    tui,
+                    cli.base_url.clone(),
+                )
+                .await
+            }
+            Err(e) => Err(e),
+        },
         Cmd::Session(s) => match s {
             SessionCmd::List => cmd_session_list().await,
             SessionCmd::Resume {
                 id,
                 prompt,
                 max_turns,
-            } => {
-                cmd_session_resume(
-                    id,
-                    prompt,
-                    max_turns,
-                    cli.model,
-                    cli.dangerously_skip_permissions,
-                    cli.auth,
-                    cli.trust_cwd,
-                    cli.base_url.clone(),
-                )
-                .await
-            }
+            } => match resolve_prompt(prompt, "session resume").await {
+                Ok(prompt) => {
+                    cmd_session_resume(
+                        id,
+                        prompt,
+                        max_turns,
+                        cli.model,
+                        cli.dangerously_skip_permissions,
+                        cli.auth,
+                        cli.trust_cwd,
+                        cli.base_url.clone(),
+                    )
+                    .await
+                }
+                Err(e) => Err(e),
+            },
             SessionCmd::Show { id } => cmd_session_show(id).await,
         },
         Cmd::Config(c) => match c {
@@ -248,6 +259,42 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Resolve the prompt argument, reading stdin when the user asked for it.
+///
+/// Rules:
+/// - `Some("-")`                         → read stdin (even if TTY).
+/// - `None` + stdin is **not** a TTY     → read stdin (auto-detect pipe).
+/// - `None` + stdin **is** a TTY         → error: prompt required.
+/// - `Some(other)`                       → use verbatim.
+///
+/// Whitespace-only stdin is rejected so a silent broken pipe doesn't launch
+/// a no-op turn.
+async fn resolve_prompt(prompt: Option<String>, subcmd: &str) -> anyhow::Result<String> {
+    let want_stdin = match prompt.as_deref() {
+        Some("-") => true,
+        None => !std::io::stdin().is_terminal(),
+        Some(_) => false,
+    };
+    if !want_stdin {
+        return prompt.ok_or_else(|| {
+            anyhow::anyhow!(
+                "{subcmd}: prompt required — pass it as an argument, use `-` to read stdin, or pipe a file (e.g. `harness {subcmd} - < prompt.txt`)"
+            )
+        });
+    }
+    let text = tokio::task::spawn_blocking(|| {
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s).map(|_| s)
+    })
+    .await
+    .context("join stdin reader")?
+    .context("read stdin prompt")?;
+    if text.trim().is_empty() {
+        anyhow::bail!("{subcmd}: stdin prompt was empty");
+    }
+    Ok(text)
 }
 
 fn init_tracing(verbose: bool) {
