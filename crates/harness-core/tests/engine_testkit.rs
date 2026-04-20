@@ -20,7 +20,9 @@ use harness_core::plan_gate::PlanGateState;
 use harness_core::ToolCtx;
 use harness_perm::PermissionSnapshot;
 use harness_proto::{ContentBlock, Message, Role, SessionId, StopReason};
-use harness_testkit::{message_delta, message_start, message_stop, no_tools, text_event, MockProvider};
+use harness_testkit::{
+    message_delta, message_start, message_stop, no_tools, text_event, MockProvider,
+};
 use tokio_util::sync::CancellationToken;
 
 fn mk_ctx(dir: &std::path::Path) -> ToolCtx {

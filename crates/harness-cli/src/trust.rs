@@ -154,9 +154,7 @@ fn ensure_trusted_inner<W: Write>(
 
     let entry = TrustEntry {
         path: canonical.display().to_string(),
-        trusted_at: chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string(),
+        trusted_at: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
     };
     store.trusted.insert(hash, entry);
     save_store(store_path, &store)?;
@@ -177,8 +175,7 @@ fn load_store(path: &Path) -> anyhow::Result<TrustStore> {
     if bytes.is_empty() {
         return Ok(TrustStore::default());
     }
-    let store: TrustStore =
-        serde_json::from_slice(&bytes).context("parse trust store JSON")?;
+    let store: TrustStore = serde_json::from_slice(&bytes).context("parse trust store JSON")?;
     if store.v != TRUST_FORMAT_VERSION {
         return Err(anyhow::anyhow!(
             "trust store version mismatch: expected {}, got {}",

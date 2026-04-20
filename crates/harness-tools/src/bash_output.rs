@@ -80,7 +80,10 @@ impl Tool for BashOutputTool {
         let (stdout_str, stderr_str) = if let Some(pat) = &parsed.filter {
             let re = regex::Regex::new(pat)
                 .map_err(|e| ToolError::Validation(format!("filter regex: {e}")))?;
-            (filter_lines(&stdout_str, &re), filter_lines(&stderr_str, &re))
+            (
+                filter_lines(&stdout_str, &re),
+                filter_lines(&stderr_str, &re),
+            )
         } else {
             (stdout_str, stderr_str)
         };

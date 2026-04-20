@@ -139,11 +139,7 @@ impl RingBuffer {
         out.extend_from_slice(&self.head);
         if self.truncated_middle > 0 {
             out.extend_from_slice(
-                format!(
-                    "\n... [{} bytes truncated] ...\n",
-                    self.truncated_middle
-                )
-                .as_bytes(),
+                format!("\n... [{} bytes truncated] ...\n", self.truncated_middle).as_bytes(),
             );
         }
         out.extend(self.tail.iter().copied());
@@ -436,7 +432,6 @@ impl BgRegistry {
         let mut g = self.inner.lock().expect("bg registry mutex poisoned");
         g.remove(id).is_some()
     }
-
 }
 
 async fn drain_into<R: AsyncRead + Unpin>(mut r: R, buf: Arc<Mutex<RingBuffer>>) {

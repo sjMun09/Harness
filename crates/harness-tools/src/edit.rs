@@ -65,9 +65,7 @@ impl Tool for EditTool {
     async fn call(&self, input: Value, ctx: ToolCtx) -> Result<ToolOutput, ToolError> {
         let ei: EditInput = parse_input(input, "Edit")?;
         if ei.old_string.is_empty() {
-            return Err(ToolError::Validation(
-                "old_string must be non-empty".into(),
-            ));
+            return Err(ToolError::Validation("old_string must be non-empty".into()));
         }
         if ei.old_string == ei.new_string {
             return Err(ToolError::Validation(
@@ -83,18 +81,12 @@ impl Tool for EditTool {
 
         let replaced = if ei.replace_all {
             if occurrences == 0 {
-                return Err(ToolError::Validation(
-                    "old_string not found in file".into(),
-                ));
+                return Err(ToolError::Validation("old_string not found in file".into()));
             }
             original.replace(&ei.old_string, &ei.new_string)
         } else {
             match occurrences {
-                0 => {
-                    return Err(ToolError::Validation(
-                        "old_string not found in file".into(),
-                    ))
-                }
+                0 => return Err(ToolError::Validation("old_string not found in file".into())),
                 1 => original.replacen(&ei.old_string, &ei.new_string, 1),
                 n => {
                     return Err(ToolError::Validation(format!(
@@ -114,7 +106,11 @@ impl Tool for EditTool {
             "edited {} ({} replacement{})\n{}",
             canonical.display(),
             if ei.replace_all { occurrences } else { 1 },
-            if ei.replace_all && occurrences != 1 { "s" } else { "" },
+            if ei.replace_all && occurrences != 1 {
+                "s"
+            } else {
+                ""
+            },
             diff,
         );
         Ok(ToolOutput {

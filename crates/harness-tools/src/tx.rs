@@ -262,7 +262,10 @@ async fn restore_file(src: &Path, dst: &Path) -> std::io::Result<()> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let tmp = parent.join(format!(".{name}.harness.rollback.{}.tmp", std::process::id()));
+    let tmp = parent.join(format!(
+        ".{name}.harness.rollback.{}.tmp",
+        std::process::id()
+    ));
     tokio::fs::copy(src, &tmp).await?;
     if let Err(e) = tokio::fs::rename(&tmp, dst).await {
         let _ = tokio::fs::remove_file(&tmp).await;
@@ -343,13 +346,21 @@ mod tests {
     #[tokio::test]
     async fn rollback_restores_multiple_files_in_one_pass() {
         let dir = tempdir().unwrap();
-        tokio::fs::write(dir.path().join("a.txt"), b"a1").await.unwrap();
-        tokio::fs::write(dir.path().join("b.txt"), b"b1").await.unwrap();
+        tokio::fs::write(dir.path().join("a.txt"), b"a1")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("b.txt"), b"b1")
+            .await
+            .unwrap();
         let tx = Transaction::open(dir.path().to_path_buf()).await.unwrap();
         tx.stage(&dir.path().join("a.txt")).await.unwrap();
         tx.stage(&dir.path().join("b.txt")).await.unwrap();
-        tokio::fs::write(dir.path().join("a.txt"), b"a2").await.unwrap();
-        tokio::fs::write(dir.path().join("b.txt"), b"b2").await.unwrap();
+        tokio::fs::write(dir.path().join("a.txt"), b"a2")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("b.txt"), b"b2")
+            .await
+            .unwrap();
         let report = tx.rollback().await.unwrap();
         assert_eq!(report.restored.len(), 2);
         assert_eq!(
@@ -398,10 +409,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let outside = tempdir().unwrap();
         let tx = Transaction::open(dir.path().to_path_buf()).await.unwrap();
-        let err = tx
-            .stage(&outside.path().join("a.txt"))
-            .await
-            .unwrap_err();
+        let err = tx.stage(&outside.path().join("a.txt")).await.unwrap_err();
         assert!(matches!(err, TxError::PathEscape(_)));
     }
 
@@ -409,7 +417,9 @@ mod tests {
     async fn stage_preserves_nested_directory_structure() {
         let dir = tempdir().unwrap();
         let nested = dir.path().join("sub").join("nested").join("f.txt");
-        tokio::fs::create_dir_all(nested.parent().unwrap()).await.unwrap();
+        tokio::fs::create_dir_all(nested.parent().unwrap())
+            .await
+            .unwrap();
         tokio::fs::write(&nested, b"deep").await.unwrap();
         let tx = Transaction::open(dir.path().to_path_buf()).await.unwrap();
         tx.stage(&nested).await.unwrap();

@@ -177,7 +177,11 @@ impl Provider for AnthropicProvider {
         if !status.is_success() {
             let retry_after = retry_after_from_headers(resp.headers());
             let body_text = resp.text().await.unwrap_or_default();
-            return Err(classify_http_error(status.as_u16(), &body_text, retry_after));
+            return Err(classify_http_error(
+                status.as_u16(),
+                &body_text,
+                retry_after,
+            ));
         }
 
         Ok(sse::parse(resp.bytes_stream()))
@@ -227,8 +231,7 @@ fn build_request_body(
 
     let system = build_system_blocks(req.system, prompt_caching);
     let tools = build_tools_array(req.tools, prompt_caching);
-    let messages =
-        serde_json::to_value(req.messages).unwrap_or_else(|_| Value::Array(Vec::new()));
+    let messages = serde_json::to_value(req.messages).unwrap_or_else(|_| Value::Array(Vec::new()));
 
     let mut body = json!({
         "model": model,
@@ -297,7 +300,6 @@ fn build_tools_array(tools: &[ToolSpec], prompt_caching: bool) -> Vec<Value> {
 fn ephemeral_marker() -> Value {
     json!({ "type": "ephemeral" })
 }
-
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

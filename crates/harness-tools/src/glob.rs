@@ -59,12 +59,10 @@ impl Tool for GlobTool {
     async fn call(&self, input: Value, ctx: ToolCtx) -> Result<ToolOutput, ToolError> {
         let gi: GlobInput = parse_input(input, "Glob")?;
         let search_root = match gi.path.as_deref() {
-            Some(p) => canonicalize_within(&ctx.cwd, Path::new(p))
-                .map_err(path_error_to_tool_error)?,
-            None => ctx
-                .cwd
-                .canonicalize()
-                .map_err(ToolError::Io)?,
+            Some(p) => {
+                canonicalize_within(&ctx.cwd, Path::new(p)).map_err(path_error_to_tool_error)?
+            }
+            None => ctx.cwd.canonicalize().map_err(ToolError::Io)?,
         };
 
         let matcher = Glob::new(&gi.pattern)
@@ -73,11 +71,10 @@ impl Tool for GlobTool {
 
         let cancel = ctx.cancel.clone();
         let root_for_walk = search_root.clone();
-        let results: Vec<(PathBuf, SystemTime)> = tokio::task::spawn_blocking(move || {
-            walk_and_match(&root_for_walk, &matcher, &cancel)
-        })
-        .await
-        .map_err(|e| ToolError::Other(format!("glob join: {e}")))?;
+        let results: Vec<(PathBuf, SystemTime)> =
+            tokio::task::spawn_blocking(move || walk_and_match(&root_for_walk, &matcher, &cancel))
+                .await
+                .map_err(|e| ToolError::Other(format!("glob join: {e}")))?;
 
         let total = results.len();
         let mut sorted = results;
@@ -138,7 +135,9 @@ fn walk_and_match(
             break;
         }
         let Ok(entry) = entry else { continue };
-        let Some(ft) = entry.file_type() else { continue };
+        let Some(ft) = entry.file_type() else {
+            continue;
+        };
         if !ft.is_file() {
             continue;
         }
@@ -192,16 +191,21 @@ mod tests {
     #[tokio::test]
     async fn finds_rust_files() {
         let dir = tempdir().unwrap();
-        tokio::fs::create_dir_all(dir.path().join("src")).await.unwrap();
-        tokio::fs::write(dir.path().join("src/a.rs"), "").await.unwrap();
-        tokio::fs::write(dir.path().join("src/b.rs"), "").await.unwrap();
-        tokio::fs::write(dir.path().join("c.txt"), "").await.unwrap();
+        tokio::fs::create_dir_all(dir.path().join("src"))
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("src/a.rs"), "")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("src/b.rs"), "")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("c.txt"), "")
+            .await
+            .unwrap();
 
         let out = GlobTool
-            .call(
-                serde_json::json!({ "pattern": "**/*.rs" }),
-                ctx(dir.path()),
-            )
+            .call(serde_json::json!({ "pattern": "**/*.rs" }), ctx(dir.path()))
             .await
             .unwrap();
         assert!(out.summary.contains("a.rs"));
@@ -212,7 +216,9 @@ mod tests {
     #[tokio::test]
     async fn empty_match_reports_zero() {
         let dir = tempdir().unwrap();
-        tokio::fs::write(dir.path().join("a.txt"), "").await.unwrap();
+        tokio::fs::write(dir.path().join("a.txt"), "")
+            .await
+            .unwrap();
         let out = GlobTool
             .call(
                 serde_json::json!({ "pattern": "**/*.nope" }),
@@ -227,10 +233,7 @@ mod tests {
     async fn invalid_pattern_is_validation_error() {
         let dir = tempdir().unwrap();
         let err = GlobTool
-            .call(
-                serde_json::json!({ "pattern": "[" }),
-                ctx(dir.path()),
-            )
+            .call(serde_json::json!({ "pattern": "[" }), ctx(dir.path()))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Validation(_)));

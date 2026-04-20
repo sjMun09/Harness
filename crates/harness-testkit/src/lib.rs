@@ -62,7 +62,9 @@ impl std::fmt::Debug for MockProvider {
             Source::Scripted(_) => "scripted",
             Source::Channel(_) => "channel",
         };
-        f.debug_struct("MockProvider").field("source", &kind).finish()
+        f.debug_struct("MockProvider")
+            .field("source", &kind)
+            .finish()
     }
 }
 
@@ -115,7 +117,9 @@ impl Provider for MockProvider {
                     .lock()
                     .map_err(|_| ProviderError::Transport("mock channel poisoned".into()))?
                     .take()
-                    .ok_or_else(|| ProviderError::Transport("mock channel already consumed".into()))?;
+                    .ok_or_else(|| {
+                        ProviderError::Transport("mock channel already consumed".into())
+                    })?;
                 // Drive the receiver as a stream; `rx.recv().await == None`
                 // (sender dropped) terminates the stream.
                 let s = stream::unfold(rx, |mut rx| async move {
@@ -296,7 +300,10 @@ mod tests {
             items[0].as_ref().unwrap(),
             StreamEvent::MessageStart { .. }
         ));
-        assert!(matches!(items[1].as_ref().unwrap(), StreamEvent::MessageStop));
+        assert!(matches!(
+            items[1].as_ref().unwrap(),
+            StreamEvent::MessageStop
+        ));
     }
 
     #[tokio::test]

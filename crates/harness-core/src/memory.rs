@@ -42,10 +42,7 @@ impl Section {
     /// Body lines that the doc author tagged as canonical examples.
     #[must_use]
     pub fn canonical_lines(&self) -> Vec<&str> {
-        self.body
-            .lines()
-            .filter(|l| is_canonical_line(l))
-            .collect()
+        self.body.lines().filter(|l| is_canonical_line(l)).collect()
     }
 
     /// Body lines that the doc author tagged as anti-examples.
@@ -90,7 +87,11 @@ impl MemoryDoc {
             if let Some(rest) = raw.strip_prefix("## ") {
                 // Flush previous.
                 if let Some(h) = cur_heading.take() {
-                    sections.push(make_section(h, cur_pattern.take(), std::mem::take(&mut cur_body)));
+                    sections.push(make_section(
+                        h,
+                        cur_pattern.take(),
+                        std::mem::take(&mut cur_body),
+                    ));
                 }
                 let (heading, pattern) = split_heading_pattern(rest);
                 cur_heading = Some(heading.to_string());

@@ -186,6 +186,9 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         app.open_permission_modal("p1".into(), "Edit".into(), "preview".into(), tx);
         let action = handle_key(&mut app, k(KeyCode::Char('y'), KeyModifiers::NONE));
-        assert_eq!(action, InputAction::ModalResolved(PermissionResponse::AllowOnce));
+        assert_eq!(
+            action,
+            InputAction::ModalResolved(PermissionResponse::AllowOnce)
+        );
     }
 }

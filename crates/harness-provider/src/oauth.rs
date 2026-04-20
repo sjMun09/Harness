@@ -69,7 +69,8 @@ pub fn load_from_claude_code_keychain() -> Result<OauthToken, OauthError> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(OauthError::Keychain(format!(
             "security(1) exited {}: {}",
-            output.status, stderr.trim()
+            output.status,
+            stderr.trim()
         )));
     }
 

@@ -13,8 +13,9 @@ Rust 로 작성된 **단일 바이너리 코딩 에이전트**. Claude Code 와 
 ## 현재 상태 (2026-04)
 
 - **iter-1 (MVP)**: 완료. workspace scaffold + 6 primitives(token, perm, mem, config, fs_safe, proc) 커밋됨.
-- **iter-2**: 5 개 병렬 에이전트 통합 완료(커밋 `feat(iter-2): integrate 5 parallel-agent outputs`). 현재 **298 workspace 테스트 전부 pass**.
-- **대기 작업**: TUI 엔진 브릿지 / Session v2 마이그레이션 / `harness-testkit` 분리 / E2E HTTP 테스트 하니스 — 병렬 개발 중.
+- **iter-2**: 5 개 병렬 에이전트 통합 완료(커밋 `feat(iter-2): integrate 5 parallel-agent outputs`).
+- **iter-2 후속 통합**: TUI 엔진 브릿지(`--tui`) / `harness-testkit` 추출 / Anthropic SSE 파서 · `--base-url` · E2E HTTP 하니스 모두 머지됨.
+- **테스트**: 기본 빌드 **307 pass**, `--features tui` 빌드 **313 pass**, 실패 0.
 
 ---
 
@@ -67,6 +68,45 @@ TODO 목록
 ```
 
 툴 호출은 stderr 에 `⏺ Tool(args)` / `↳ ok|err: <summary>` 로 찍히고, 최종 assistant 텍스트만 stdout 으로 나온다. 그래서 `harness ask ... > out.txt` 로 깨끗하게 답만 캡처할 수 있다.
+
+---
+
+## Claude Code 와의 비교
+
+Harness 는 Claude Code 를 대체하려는 게 아니라 **특정 사용 결을 더 좋게** 하려는 도구다. 아래 표는 설계·스코프 차이이며, **실측 성능 수치는 아래 "벤치마크" 섹션에서 `bench/` 하니스를 돌려 직접 채우는 것**을 원칙으로 한다 — 아직 숫자는 의도적으로 비워 두었다.
+
+### 설계 · 스코프
+
+| 축 | Claude Code | Harness |
+|---|---|---|
+| **배포 형태** | Node 번들 (npm 전역 설치) | Rust 단일 정적 바이너리 (`cargo install`) |
+| **시작 모델** | REPL/대화 중심 (세션이 길게 살아있음) | **단발성 턴**(`ask`) 우선, 세션 resume 은 명시적 (`session resume`) |
+| **1 차 타겟** | 범용 개발(웹/앱/데이터/리서치) | **레거시 백엔드 리팩토링**(XML/SQL/Freemarker/MyBatis) 1 급 |
+| **멀티 벤더** | Anthropic 1 급, OpenAI 별도 경로 | Anthropic 1 급, OpenAI 2 급(같은 `--model` 라우팅), 나머지 BYO |
+| **툴 확장** | MCP 서버, skills 마켓플레이스 | 내장 14 종 + `Subagent` 툴, MCP 미지원 |
+| **권한 모델** | `settings.json` allow/deny + 세션 permission | 동일 grammar + `HARNESS.md` + plan-gate(계획 위반 차단) |
+| **승인 UI** | Ask 시 TUI 모달 | 라인 모드 stderr 프롬프트 / `--tui` 시 ratatui 모달 |
+| **세션 저장** | 자체 포맷 | JSONL 스트리밍, `harness session show/list/resume` 재생 가능 |
+| **취소 시맨틱** | Ctrl-C 후 재개 유도 | Ctrl-C → 부분 assistant 텍스트 보존 + `SessionExit::Cancelled` 마커 |
+| **백그라운드 Bash** | 지원 | 지원 (`run_in_background` → `BashOutput`/`KillShell`, setsid + `PR_SET_PDEATHSIG`) |
+| **롤백** | 없음 (git 수동) | `harness-tools::Transaction` — 턴 단위 스테이징, 실패 시 자동 되돌림 |
+| **SSE 프레임 캡** | 내부 구현 | 1 MiB 하드 캡(프로바이더 DoS 방어) |
+| **언어 · 런타임** | Node 18+ | Rust 1.82+ (외부 런타임 불필요) |
+| **라이선스** | 비공개 | MIT OR Apache-2.0 (`Cargo.toml:9`) |
+
+### 실측 성능 (자리 표시)
+
+> **Note.** 아래 표의 숫자는 실제 벤치를 돌려 채운 값이 아니라 **템플릿**이다. `bench/` 하니스를 사용해 본인의 머신·API 키·네트워크에서 재현한 뒤, 해당 결과를 이 표에 커밋하는 식으로 쓰면 된다. 날조된 숫자는 의도적으로 적지 않는다.
+
+| 지표 | Claude Code | Harness | 비고 |
+|---|---|---|---|
+| 콜드 스타트 → 첫 토큰 (ms) | TBD | TBD | `harness ask "hi"` vs `claude "hi"` |
+| `glob **/*.rs` 1k 파일 스캔 (ms) | TBD | TBD | 단일 tool-call 지연 |
+| 10-파일 리팩토링 턴 완주(초) | TBD | TBD | `bench/prompts/refactor.md` |
+| 토큰 사용량(input + output) | TBD | TBD | provider usage 로그 |
+| 100 턴당 실패율(타임아웃/파싱 오류) | TBD | TBD | 재현 가능한 오류만 집계 |
+
+벤치 수행 방법 및 결과 집계 형식은 [`bench/README.md`](bench/README.md) 를 참고. 실제 수치를 넣으면 바로 이 표 자리로 옮기면 된다.
 
 ---
 

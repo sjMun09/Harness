@@ -31,9 +31,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),         // header
-            Constraint::Min(3),            // scrollback
-            Constraint::Length(1),         // status
+            Constraint::Length(1), // header
+            Constraint::Min(3),    // scrollback
+            Constraint::Length(1), // status
             Constraint::Length(input_height(&app.input)),
         ])
         .split(size);
@@ -107,7 +107,9 @@ fn draw_scrollback(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
             Entry::User(text) => {
                 lines.push(Line::from(Span::styled(
                     "▎ user".to_string(),
-                    Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
                 )));
                 for ln in text.lines() {
                     lines.push(Line::from(Span::raw(format!("  {ln}"))));

@@ -43,8 +43,7 @@ fn ceil_char_boundary(s: &str, idx: usize) -> usize {
 
 /// Parse input JSON with a uniform `Validation` error on failure.
 pub fn parse_input<T: DeserializeOwned>(input: Value, tool: &str) -> Result<T, ToolError> {
-    serde_json::from_value::<T>(input)
-        .map_err(|e| ToolError::Validation(format!("{tool}: {e}")))
+    serde_json::from_value::<T>(input).map_err(|e| ToolError::Validation(format!("{tool}: {e}")))
 }
 
 /// Wrap raw tool output in `<untrusted_tool_output tool="..." path="...">…</untrusted_tool_output>`.

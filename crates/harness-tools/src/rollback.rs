@@ -155,7 +155,9 @@ mod tests {
             .await
             .unwrap();
         assert!(out.summary.contains("nothing to revert"));
-        assert!(out.summary.contains("<untrusted_tool_output tool=\"Rollback\""));
+        assert!(out
+            .summary
+            .contains("<untrusted_tool_output tool=\"Rollback\""));
     }
 
     #[tokio::test]

@@ -58,8 +58,7 @@ fn render<W: Write>(w: &mut W, ev: &TurnEvent, styled: bool) -> io::Result<()> {
 /// avoid splitting a multi-byte codepoint). Appends `…` when truncated.
 fn truncate_line(s: &str, max: usize) -> String {
     let mut out = String::with_capacity(s.len().min(max * 4));
-    let mut written = 0usize;
-    for c in s.chars() {
+    for (written, c) in s.chars().enumerate() {
         if written >= max {
             out.push('…');
             return out;
@@ -69,7 +68,6 @@ fn truncate_line(s: &str, max: usize) -> String {
             c if c.is_control() => out.push(' '),
             c => out.push(c),
         }
-        written += 1;
     }
     out
 }

@@ -54,9 +54,9 @@ impl Tool for KillShellTool {
             .map_err(|e| ToolError::Validation(format!("KillShell input: {e}")))?;
 
         let registry = BgRegistry::global();
-        registry.kill(&parsed.shell_id).map_err(|_| {
-            ToolError::Validation(format!("unknown shell_id: {}", parsed.shell_id))
-        })?;
+        registry
+            .kill(&parsed.shell_id)
+            .map_err(|_| ToolError::Validation(format!("unknown shell_id: {}", parsed.shell_id)))?;
 
         Ok(ToolOutput {
             summary: format!("killed shell_id={}", parsed.shell_id),

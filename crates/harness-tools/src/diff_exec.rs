@@ -276,12 +276,64 @@ fn collapse_whitespace(input: &str) -> String {
 }
 
 const SQL_KEYWORDS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "NULL", "IS", "IN", "EXISTS", "LIKE",
-    "BETWEEN", "JOIN", "INNER", "LEFT", "RIGHT", "OUTER", "FULL", "CROSS", "ON", "USING",
-    "GROUP", "BY", "HAVING", "ORDER", "ASC", "DESC", "LIMIT", "OFFSET", "UNION", "ALL",
-    "DISTINCT", "CASE", "WHEN", "THEN", "ELSE", "END", "AS", "WITH", "INSERT", "INTO",
-    "VALUES", "UPDATE", "SET", "DELETE", "CREATE", "TABLE", "INDEX", "VIEW", "ALTER",
-    "DROP", "IF", "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "DEFAULT", "UNIQUE",
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "AND",
+    "OR",
+    "NOT",
+    "NULL",
+    "IS",
+    "IN",
+    "EXISTS",
+    "LIKE",
+    "BETWEEN",
+    "JOIN",
+    "INNER",
+    "LEFT",
+    "RIGHT",
+    "OUTER",
+    "FULL",
+    "CROSS",
+    "ON",
+    "USING",
+    "GROUP",
+    "BY",
+    "HAVING",
+    "ORDER",
+    "ASC",
+    "DESC",
+    "LIMIT",
+    "OFFSET",
+    "UNION",
+    "ALL",
+    "DISTINCT",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "AS",
+    "WITH",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "CREATE",
+    "TABLE",
+    "INDEX",
+    "VIEW",
+    "ALTER",
+    "DROP",
+    "IF",
+    "PRIMARY",
+    "KEY",
+    "FOREIGN",
+    "REFERENCES",
+    "DEFAULT",
+    "UNIQUE",
     "CONSTRAINT",
 ];
 
@@ -461,8 +513,12 @@ mod tests {
     async fn identical_files_report_identical() {
         let dir = tempdir().unwrap();
         let sql = "SELECT a FROM t WHERE id = 1";
-        tokio::fs::write(dir.path().join("a.sql"), sql).await.unwrap();
-        tokio::fs::write(dir.path().join("b.sql"), sql).await.unwrap();
+        tokio::fs::write(dir.path().join("a.sql"), sql)
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("b.sql"), sql)
+            .await
+            .unwrap();
         let out = DiffExecTool
             .call(
                 serde_json::json!({"before_path": "a.sql", "after_path": "b.sql"}),
@@ -509,8 +565,12 @@ mod tests {
     #[tokio::test]
     async fn text_mode_shows_whitespace_diff() {
         let dir = tempdir().unwrap();
-        tokio::fs::write(dir.path().join("a"), "hello world").await.unwrap();
-        tokio::fs::write(dir.path().join("b"), "hello  world").await.unwrap();
+        tokio::fs::write(dir.path().join("a"), "hello world")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("b"), "hello  world")
+            .await
+            .unwrap();
         let out = DiffExecTool
             .call(
                 serde_json::json!({
@@ -535,12 +595,9 @@ mod tests {
         )
         .await
         .unwrap();
-        tokio::fs::write(
-            dir.path().join("after.sql"),
-            "SELECT a FROM t WHERE id = 2",
-        )
-        .await
-        .unwrap();
+        tokio::fs::write(dir.path().join("after.sql"), "SELECT a FROM t WHERE id = 2")
+            .await
+            .unwrap();
         let out = DiffExecTool
             .call(
                 serde_json::json!({
@@ -558,8 +615,12 @@ mod tests {
     #[tokio::test]
     async fn warning_banner_always_present() {
         let dir = tempdir().unwrap();
-        tokio::fs::write(dir.path().join("a.sql"), "SELECT 1").await.unwrap();
-        tokio::fs::write(dir.path().join("b.sql"), "SELECT 1").await.unwrap();
+        tokio::fs::write(dir.path().join("a.sql"), "SELECT 1")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("b.sql"), "SELECT 1")
+            .await
+            .unwrap();
         let out = DiffExecTool
             .call(
                 serde_json::json!({"before_path": "a.sql", "after_path": "b.sql"}),
@@ -573,7 +634,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_missing_before() {
         let dir = tempdir().unwrap();
-        tokio::fs::write(dir.path().join("b.sql"), "SELECT 1").await.unwrap();
+        tokio::fs::write(dir.path().join("b.sql"), "SELECT 1")
+            .await
+            .unwrap();
         let err = DiffExecTool
             .call(
                 serde_json::json!({"before_path": "missing.sql", "after_path": "b.sql"}),
@@ -581,7 +644,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::Io(_) | ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            err,
+            ToolError::Io(_) | ToolError::PermissionDenied(_)
+        ));
     }
 
     #[tokio::test]
@@ -594,6 +660,9 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::PermissionDenied(_) | ToolError::Io(_)));
+        assert!(matches!(
+            err,
+            ToolError::PermissionDenied(_) | ToolError::Io(_)
+        ));
     }
 }

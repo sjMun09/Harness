@@ -38,7 +38,11 @@ impl Budget {
             .used
             .input_tokens
             .saturating_add(self.used.output_tokens);
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         let cap = ((self.max_total_tokens as f64) * BUDGET_SAFETY_FACTOR) as u64;
         total >= cap
     }

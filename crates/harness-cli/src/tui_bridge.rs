@@ -92,7 +92,10 @@ impl std::fmt::Debug for TuiEngineDriver {
         f.debug_struct("TuiEngineDriver")
             .field("initial_messages", &self.initial.len())
             .field("engine_cancel", &"<token>")
-            .field("outcome_slot", &self.outcome_slot.as_ref().map(|_| "<slot>"))
+            .field(
+                "outcome_slot",
+                &self.outcome_slot.as_ref().map(|_| "<slot>"),
+            )
             .finish()
     }
 }
@@ -202,7 +205,9 @@ impl EngineDriver for TuiEngineDriver {
                         | CancelReason::Timeout
                         | CancelReason::Internal => TurnEndReason::Cancelled,
                     };
-                    let _ = handle.events_tx.send(TuiEvent::TurnEnd { reason: tui_reason });
+                    let _ = handle
+                        .events_tx
+                        .send(TuiEvent::TurnEnd { reason: tui_reason });
                 }
                 Err(e) => {
                     let _ = handle.events_tx.send(TuiEvent::Error {
@@ -282,7 +287,11 @@ fn build_sink(events_tx: tokio::sync::mpsc::UnboundedSender<TuiEvent>) -> EventS
 /// `messages`. If there is no assistant message (e.g. cancelled before any
 /// text finalized), emit nothing — the TUI leaves scrollback as-is.
 fn emit_final_assistant(handle: &EngineHandle, messages: &[Message]) {
-    let Some(msg) = messages.iter().rev().find(|m| matches!(m.role, Role::Assistant)) else {
+    let Some(msg) = messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, Role::Assistant))
+    else {
         return;
     };
     let mut text = String::new();
@@ -295,9 +304,7 @@ fn emit_final_assistant(handle: &EngineHandle, messages: &[Message]) {
         }
     }
     if !text.is_empty() {
-        let _ = handle
-            .events_tx
-            .send(TuiEvent::AssistantTextDelta { text });
+        let _ = handle.events_tx.send(TuiEvent::AssistantTextDelta { text });
     }
     let _ = handle.events_tx.send(TuiEvent::AssistantMessageEnd);
 }
@@ -408,7 +415,10 @@ mod tests {
         });
         // Drop the sink so the receiver wakes on the last sender going away.
         drop(sink);
-        assert!(rx.recv().await.is_none(), "Cancelled should produce no TUI event");
+        assert!(
+            rx.recv().await.is_none(),
+            "Cancelled should produce no TUI event"
+        );
     }
 
     /// `emit_final_assistant` collects Text blocks from the newest Assistant
@@ -469,6 +479,9 @@ mod tests {
         drop(handle);
         // Without an assistant message, we emit nothing — rx should close
         // cleanly with no pending events.
-        assert!(rx.recv().await.is_none(), "expected no events when no assistant");
+        assert!(
+            rx.recv().await.is_none(),
+            "expected no events when no assistant"
+        );
     }
 }

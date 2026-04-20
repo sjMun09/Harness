@@ -216,10 +216,7 @@ mod tests {
             !out.contains("sk-abc123"),
             "secret survived redaction: {out}"
         );
-        assert!(
-            out.contains("***"),
-            "expected *** placeholder in: {out}"
-        );
+        assert!(out.contains("***"), "expected *** placeholder in: {out}");
     }
 
     #[test]

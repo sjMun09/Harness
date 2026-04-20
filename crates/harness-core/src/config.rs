@@ -190,7 +190,9 @@ pub fn load() -> Result<Settings, ConfigError> {
     for path in candidate_paths() {
         let layered = match load_file(&path) {
             Ok(s) => s,
-            Err(ConfigError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            Err(ConfigError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
                 continue;
             }
             Err(e) => return Err(e),

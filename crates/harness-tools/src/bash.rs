@@ -152,7 +152,7 @@ impl Tool for BashTool {
                 match res {
                     Ok((out, err, Ok(status))) => {
                         let combined = combine_output(&out, &err);
-                        let detail_path = write_detail(&ctx.session_id.as_str(), &combined).await;
+                        let detail_path = write_detail(ctx.session_id.as_str(), &combined).await;
                         let header = format!(
                             "exit {} ({} stdout / {} stderr bytes)",
                             status.code().map_or_else(|| "sig".to_string(), |c| c.to_string()),
@@ -185,9 +185,8 @@ impl Tool for BashTool {
 }
 
 fn build_argv_command(command: &str) -> Result<Command, ToolError> {
-    let parts = shlex::split(command).ok_or_else(|| {
-        ToolError::Validation(format!("bash: could not shlex-split {command:?}"))
-    })?;
+    let parts = shlex::split(command)
+        .ok_or_else(|| ToolError::Validation(format!("bash: could not shlex-split {command:?}")))?;
     if parts.is_empty() {
         return Err(ToolError::Validation("bash: empty command".into()));
     }
@@ -346,7 +345,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(out.summary.contains("absent"), "scrub failed: {}", out.summary);
+        assert!(
+            out.summary.contains("absent"),
+            "scrub failed: {}",
+            out.summary
+        );
         std::env::remove_var("SECRET_XYZ");
     }
 
@@ -409,7 +412,9 @@ mod tests {
     fn parse_pid(summary: &str) -> i32 {
         let key = "pid=";
         let after = &summary[summary.find(key).unwrap() + key.len()..];
-        let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+        let end = after
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after.len());
         after[..end].parse().unwrap_or(0)
     }
 
@@ -473,7 +478,10 @@ mod tests {
         for tok in ["1", "2", "3"] {
             assert!(combined.contains(tok), "missing {tok} in {combined}");
         }
-        assert!(combined.contains("exited"), "should have exited: {combined}");
+        assert!(
+            combined.contains("exited"),
+            "should have exited: {combined}"
+        );
     }
 
     #[cfg(unix)]

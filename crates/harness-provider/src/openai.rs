@@ -143,7 +143,11 @@ impl Provider for OpenAIProvider {
         if !status.is_success() {
             let retry_after = retry_after_from_headers(resp.headers());
             let body_text = resp.text().await.unwrap_or_default();
-            return Err(classify_http_error(status.as_u16(), &body_text, retry_after));
+            return Err(classify_http_error(
+                status.as_u16(),
+                &body_text,
+                retry_after,
+            ));
         }
 
         Ok(parse_stream(resp.bytes_stream()))
@@ -293,7 +297,9 @@ fn translate_message(m: &Message) -> Vec<Value> {
                 .content
                 .iter()
                 .filter_map(|b| match b {
-                    ContentBlock::ToolUse { id, name, input, .. } => Some(json!({
+                    ContentBlock::ToolUse {
+                        id, name, input, ..
+                    } => Some(json!({
                         "id": id,
                         "type": "function",
                         "function": {
@@ -497,13 +503,13 @@ fn extract_frame(buf: &mut BytesMut) -> Option<String> {
 
 fn find_frame_end(haystack: &[u8]) -> Option<(usize, usize)> {
     // Prefer `\r\n\r\n`; fall back to `\n\n`.
-    if let Some(i) = haystack
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-    {
+    if let Some(i) = haystack.windows(4).position(|w| w == b"\r\n\r\n") {
         return Some((i, 4));
     }
-    haystack.windows(2).position(|w| w == b"\n\n").map(|i| (i, 2))
+    haystack
+        .windows(2)
+        .position(|w| w == b"\n\n")
+        .map(|i| (i, 2))
 }
 
 fn process_frame(frame: &str, state: &mut StreamState) -> Result<FrameOutcome, ProviderError> {
@@ -652,9 +658,7 @@ fn flush_terminal(state: &mut StreamState, queue: &mut VecDeque<StreamEvent>) {
         state.text.opened = false;
     }
     // Iterate in BTreeMap order → stable by `tool_calls[i].index`.
-    let tool_calls: Vec<_> = std::mem::take(&mut state.tool_calls)
-        .into_iter()
-        .collect();
+    let tool_calls: Vec<_> = std::mem::take(&mut state.tool_calls).into_iter().collect();
     for (_, tc) in tool_calls {
         if tc.opened {
             queue.push_back(StreamEvent::ContentBlockStop { index: tc.index });
@@ -819,10 +823,7 @@ mod tests {
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "Read");
         assert_eq!(body["tools"][0]["function"]["description"], "read a file");
-        assert_eq!(
-            body["tools"][0]["function"]["parameters"]["type"],
-            "object"
-        );
+        assert_eq!(body["tools"][0]["function"]["parameters"]["type"], "object");
     }
 
     #[test]

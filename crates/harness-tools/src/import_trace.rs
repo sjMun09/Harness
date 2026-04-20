@@ -113,8 +113,9 @@ impl Tool for ImportTraceTool {
         let root_file = canonicalize_within(&ctx.cwd, Path::new(&inp.file_path))
             .map_err(path_error_to_tool_error)?;
         let mapper_root = match inp.mapper_root.as_deref() {
-            Some(r) => canonicalize_within(&ctx.cwd, Path::new(r))
-                .map_err(path_error_to_tool_error)?,
+            Some(r) => {
+                canonicalize_within(&ctx.cwd, Path::new(r)).map_err(path_error_to_tool_error)?
+            }
             None => ctx.cwd.clone(),
         };
         let resolved_kind = match inp.kind {
@@ -323,9 +324,7 @@ fn walk_mybatis_ref(
     stats.refs_total += 1;
     stats.max_depth_seen = stats.max_depth_seen.max(depth);
 
-    let qualified = if refid.contains('.') {
-        refid.to_string()
-    } else if current_ns.is_empty() {
+    let qualified = if refid.contains('.') || current_ns.is_empty() {
         refid.to_string()
     } else {
         format!("{current_ns}.{refid}")
@@ -811,7 +810,11 @@ mod tests {
         let td = TempDir::new().unwrap();
         let root = td.path();
         write(root, "main.ftl", r#"<#include "partials/header.ftl">"#);
-        write(root, "partials/header.ftl", r#"<#import "../util.ftl" as u>"#);
+        write(
+            root,
+            "partials/header.ftl",
+            r#"<#import "../util.ftl" as u>"#,
+        );
         write(root, "util.ftl", "<#-- utility -->");
         let main = root.join("main.ftl");
         let (tree, stats) = trace_freemarker(&main, 32).unwrap();

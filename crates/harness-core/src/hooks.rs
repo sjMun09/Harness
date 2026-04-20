@@ -156,10 +156,7 @@ impl HookDispatcher {
     }
 
     pub fn has(&self, event: HookEvent) -> bool {
-        self.inner
-            .hooks
-            .get(&event)
-            .map_or(false, |v| !v.is_empty())
+        self.inner.hooks.get(&event).is_some_and(|v| !v.is_empty())
     }
 
     /// Run every configured hook for `event`; return the first non-Allow result,

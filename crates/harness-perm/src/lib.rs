@@ -49,7 +49,10 @@ pub enum Matcher {
     /// Shlex-tokenized prefix (Bash).
     ShlexPrefix(Vec<String>),
     /// Globset pattern (Read/Write/Edit/Glob/Grep).
-    Glob { source: String, matcher: GlobMatcher },
+    Glob {
+        source: String,
+        matcher: GlobMatcher,
+    },
 }
 
 impl Matcher {
@@ -149,8 +152,9 @@ impl Rule {
             Matcher::ShlexPrefix(prefix) => bash_command(input).is_some_and(|cmd| {
                 shlex::split(&cmd).is_some_and(|cmd_toks| starts_with_tokens(&cmd_toks, prefix))
             }),
-            Matcher::Glob { matcher, .. } => glob_target(tool, input)
-                .is_some_and(|s| matcher.is_match(std::path::Path::new(&s))),
+            Matcher::Glob { matcher, .. } => {
+                glob_target(tool, input).is_some_and(|s| matcher.is_match(std::path::Path::new(&s)))
+            }
         }
     }
 }
@@ -273,6 +277,7 @@ pub enum PermError {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -299,10 +304,7 @@ mod tests {
             Rule::parse("Write(/etc/**)").unwrap().matcher,
             Matcher::Glob { .. }
         ));
-        assert!(matches!(
-            Rule::parse("Glob").unwrap().matcher,
-            Matcher::Any
-        ));
+        assert!(matches!(Rule::parse("Glob").unwrap().matcher, Matcher::Any));
     }
 
     #[test]
@@ -361,7 +363,7 @@ mod tests {
         // Both allow-rules match, but sort order should put the more-specific
         // one ahead — matters if we ever report which rule matched.
         let inner = &p.inner.allow;
-        assert_eq!(inner[0].matcher.specificity() >= inner[1].matcher.specificity(), true);
+        assert!(inner[0].matcher.specificity() >= inner[1].matcher.specificity());
     }
 
     #[test]

@@ -25,13 +25,13 @@ use harness_core::plan_gate::PlanGateState;
 use harness_core::subagent::{OptHost, SubagentHost};
 use harness_core::tx::TxHandle;
 use harness_core::{Provider, Tool, ToolCtx};
-use subagent_host::CliSubagentHost;
 use harness_mem::{Record, SessionHeader};
 use harness_perm::{PermissionSnapshot, Rule};
 use harness_proto::{ContentBlock, Message, SessionId};
 use harness_provider::{
     load_from_claude_code_keychain, AnthropicProvider, OauthError, OauthToken, OpenAIProvider,
 };
+use subagent_host::CliSubagentHost;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -258,8 +258,7 @@ fn init_tracing(verbose: bool) {
         );
     }
     let default = if verbose { "debug" } else { "info" };
-    let filter =
-        EnvFilter::try_from_env("HARNESS_LOG").unwrap_or_else(|_| EnvFilter::new(default));
+    let filter = EnvFilter::try_from_env("HARNESS_LOG").unwrap_or_else(|_| EnvFilter::new(default));
     let redacting_writer = redact::RedactingMakeWriter::new(std::io::stderr);
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -310,7 +309,9 @@ async fn cmd_ask(
         #[cfg(not(feature = "tui"))]
         {
             let _ = run;
-            anyhow::bail!("--tui was requested but this binary was built without the `tui` feature");
+            anyhow::bail!(
+                "--tui was requested but this binary was built without the `tui` feature"
+            );
         }
     }
 
@@ -617,8 +618,8 @@ async fn run_session_tui(run: SessionRun) -> anyhow::Result<SessionExit> {
         .unwrap_or_default();
 
     let outcome_slot = tui_bridge::new_outcome_slot();
-    let driver = tui_bridge::TuiEngineDriver::new(inputs, initial)
-        .with_outcome_slot(outcome_slot.clone());
+    let driver =
+        tui_bridge::TuiEngineDriver::new(inputs, initial).with_outcome_slot(outcome_slot.clone());
 
     let app = TuiApp::new(model.clone(), format!("{session_id}"))?;
     let run_result = app.run_session(prompt_text, Box::new(driver)).await;
@@ -745,8 +746,7 @@ fn build_provider(
         }
     };
     if let Some(raw) = base_url {
-        let url = url::Url::parse(raw)
-            .with_context(|| format!("parse --base-url value: {raw}"))?;
+        let url = url::Url::parse(raw).with_context(|| format!("parse --base-url value: {raw}"))?;
         p = p.with_base_url(url);
     }
     Ok(Arc::new(p))
@@ -762,7 +762,9 @@ fn is_openai_model(model: &str) -> bool {
 }
 
 fn env_has(var: &str) -> bool {
-    std::env::var(var).map(|v| !v.trim().is_empty()).unwrap_or(false)
+    std::env::var(var)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
 }
 
 fn load_oauth_token() -> Result<OauthToken, OauthError> {
@@ -774,8 +776,8 @@ fn load_oauth_token() -> Result<OauthToken, OauthError> {
 /// skipped silently — `SessionStart` hook validation (PLAN §3.2) is iter-2.
 fn load_memory(settings: &Settings) -> MemoryDoc {
     let mut paths: Vec<PathBuf> = Vec::new();
-    let user_dir = harness_core::config::user_settings_path()
-        .and_then(|p| p.parent().map(Path::to_path_buf));
+    let user_dir =
+        harness_core::config::user_settings_path().and_then(|p| p.parent().map(Path::to_path_buf));
     let cwd = std::env::current_dir().ok();
     for raw in &settings.harness.memory_paths {
         let pb = PathBuf::from(raw);
@@ -831,9 +833,14 @@ fn print_final(messages: &[Message]) {
 }
 
 async fn cmd_session_list() -> anyhow::Result<SessionExit> {
-    let ids = harness_mem::list_sessions().await.context("list sessions")?;
+    let ids = harness_mem::list_sessions()
+        .await
+        .context("list sessions")?;
     if ids.is_empty() {
-        eprintln!("no sessions under {}", harness_mem::sessions_dir().display());
+        eprintln!(
+            "no sessions under {}",
+            harness_mem::sessions_dir().display()
+        );
         return Ok(SessionExit::Ok);
     }
     for id in ids {
@@ -919,7 +926,9 @@ async fn cmd_session_show(id: String) -> anyhow::Result<SessionExit> {
         };
         println!(
             "  [{i}] {kind}: {}",
-            first_text.map(|t| head(t, 80)).unwrap_or_else(|| "<no text>".into())
+            first_text
+                .map(|t| head(t, 80))
+                .unwrap_or_else(|| "<no text>".into())
         );
     }
     Ok(SessionExit::Ok)

@@ -130,9 +130,7 @@ pub fn render_inline(s: &str) -> Vec<Span<'static>> {
                 push_buf(&mut buf, &mut out);
                 out.push(Span::styled(
                     code.to_string(),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .bg(Color::Rgb(30, 30, 30)),
+                    Style::default().fg(Color::Cyan).bg(Color::Rgb(30, 30, 30)),
                 ));
                 i = i + 1 + end + 1;
                 continue;
@@ -268,10 +266,7 @@ mod tests {
         let t = render("- one\n- two");
         assert_eq!(t.lines.len(), 2);
         assert!(t.lines[0].spans[0].content.contains("•"));
-        assert!(t.lines[0]
-            .spans
-            .iter()
-            .any(|s| s.content.as_ref() == "one"));
+        assert!(t.lines[0].spans.iter().any(|s| s.content.as_ref() == "one"));
     }
 
     #[test]

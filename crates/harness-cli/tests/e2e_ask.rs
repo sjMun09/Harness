@@ -120,9 +120,8 @@ fn ask_returns_final_assistant_text() {
         .unwrap();
 
     // One HTTP call → one scripted SSE stream with a single text block.
-    let (server, addr) = rt.block_on(async {
-        FakeServer::start(vec![Script::text_only("hello from fake")]).await
-    });
+    let (server, addr) =
+        rt.block_on(async { FakeServer::start(vec![Script::text_only("hello from fake")]).await });
 
     let url = format!("http://{addr}");
     let mut cmd = harness_cmd(&tmp, &url);
@@ -172,7 +171,11 @@ fn ask_executes_tool_call_then_final_text() {
 
     let (server, addr) = rt.block_on(async {
         FakeServer::start(vec![
-            Script::tool_use("toolu_1", "Read", &format!(r#"{{"file_path":"{target_rel}"}}"#)),
+            Script::tool_use(
+                "toolu_1",
+                "Read",
+                &format!(r#"{{"file_path":"{target_rel}"}}"#),
+            ),
             Script::text_only("done"),
         ])
         .await

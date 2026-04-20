@@ -64,12 +64,10 @@ pub struct Meta {
 #[must_use]
 pub fn state_dir() -> PathBuf {
     use etcetera::BaseStrategy;
-    etcetera::choose_base_strategy()
-        .ok()
-        .map_or_else(
-            || PathBuf::from(".").join(".harness"),
-            |s| s.data_dir().join("harness"),
-        )
+    etcetera::choose_base_strategy().ok().map_or_else(
+        || PathBuf::from(".").join(".harness"),
+        |s| s.data_dir().join("harness"),
+    )
 }
 
 /// Sessions directory — `<state>/sessions/`.
@@ -122,10 +120,7 @@ fn append_locked(path: &Path, payload: &[u8]) -> Result<(), MemError> {
     use std::fs::OpenOptions;
     use std::io::Write;
 
-    let mut f = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let mut f = OpenOptions::new().create(true).append(true).open(path)?;
     f.lock_exclusive()?;
     let res: std::io::Result<()> = (|| {
         f.write_all(payload)?;
@@ -343,6 +338,7 @@ pub enum MemError {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use harness_proto::Role;

@@ -274,10 +274,7 @@ mod tests {
             GateOutcome::Block { reason } => assert!(reason.contains("PLAN-GATE")),
             _ => panic!("expected first call blocked"),
         }
-        assert!(matches!(
-            state.evaluate("Edit", &input),
-            GateOutcome::Allow
-        ));
+        assert!(matches!(state.evaluate("Edit", &input), GateOutcome::Allow));
     }
 
     #[test]
@@ -319,7 +316,10 @@ mod tests {
     #[test]
     fn absolute_path_matches_double_star_glob() {
         let state = PlanGateState::from_config(&cfg(&["**/*.xml"], &["Edit"]));
-        match state.evaluate("Edit", &json!({"file_path": "/tmp/plan-gate-test/sample.xml"})) {
+        match state.evaluate(
+            "Edit",
+            &json!({"file_path": "/tmp/plan-gate-test/sample.xml"}),
+        ) {
             GateOutcome::Block { .. } => {}
             other => panic!("expected block on absolute xml path, got {other:?}"),
         }
@@ -396,9 +396,7 @@ mod tests {
 
     #[test]
     fn advise_after_returns_none_for_non_gated_path() {
-        let mem = MemoryDoc::parse(
-            "## Test Commands\n$ cargo test\n",
-        );
+        let mem = MemoryDoc::parse("## Test Commands\n$ cargo test\n");
         let state =
             PlanGateState::from_config_with_memory(&cfg(&["**/*.xml"], &["Edit"]), Some(mem));
         // Path doesn't match XML pattern.
@@ -409,9 +407,7 @@ mod tests {
 
     #[test]
     fn advise_after_returns_none_when_no_test_section_matches() {
-        let mem = MemoryDoc::parse(
-            "## Conventions\nplain prose only\n",
-        );
+        let mem = MemoryDoc::parse("## Conventions\nplain prose only\n");
         let state =
             PlanGateState::from_config_with_memory(&cfg(&["**/*.xml"], &["Edit"]), Some(mem));
         assert!(state

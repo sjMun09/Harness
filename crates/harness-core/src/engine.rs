@@ -16,7 +16,9 @@ use tracing::{debug, info, warn};
 
 use crate::hooks::{HookAction, HookDispatcher, HookEvent};
 use crate::plan_gate::{GateOutcome, PlanGateState};
-use crate::provider::{ContentBlockHeader, Provider, ProviderError, StreamEvent, StreamRequest, ToolSpec};
+use crate::provider::{
+    ContentBlockHeader, Provider, ProviderError, StreamEvent, StreamRequest, ToolSpec,
+};
 use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput};
 use crate::turn::{BlockState, FinalizeError};
 
@@ -445,10 +447,12 @@ async fn consume_stream(
                     // Delta for unknown index — treat as new block starter.
                     let stub = BlockState::from_start(match &delta {
                         crate::provider::ContentDelta::Text(_) => ContentBlockHeader::Text,
-                        crate::provider::ContentDelta::InputJson(_) => ContentBlockHeader::ToolUse {
-                            id: String::new(),
-                            name: String::new(),
-                        },
+                        crate::provider::ContentDelta::InputJson(_) => {
+                            ContentBlockHeader::ToolUse {
+                                id: String::new(),
+                                name: String::new(),
+                            }
+                        }
                     });
                     acc.blocks.insert(index, stub);
                     if !acc.order.contains(&index) {
@@ -533,13 +537,19 @@ async fn dispatch_tool_uses(
 /// the actual content, not the fence wrapper.
 fn tool_result_to_head(block: &ContentBlock) -> (bool, String) {
     let (ok, text) = match block {
-        ContentBlock::ToolResult { content, is_error, .. } => (!is_error, content.as_str()),
+        ContentBlock::ToolResult {
+            content, is_error, ..
+        } => (!is_error, content.as_str()),
         _ => (true, ""),
     };
     let head = text
         .lines()
         .map(str::trim)
-        .find(|l| !l.is_empty() && !l.starts_with("<untrusted_tool_output") && !l.starts_with("</untrusted_tool_output"))
+        .find(|l| {
+            !l.is_empty()
+                && !l.starts_with("<untrusted_tool_output")
+                && !l.starts_with("</untrusted_tool_output")
+        })
         .unwrap_or("")
         .to_string();
     (ok, head)
@@ -615,7 +625,10 @@ async fn dispatch_one(
         "input": input,
         "ok": call_res.is_ok(),
     });
-    let _ = ctx.hooks.dispatch(HookEvent::PostToolUse, post_payload).await;
+    let _ = ctx
+        .hooks
+        .dispatch(HookEvent::PostToolUse, post_payload)
+        .await;
 
     match call_res {
         Ok(ToolOutput { mut summary, .. }) => {
@@ -679,7 +692,10 @@ mod tests {
                 .pop()
                 .unwrap_or_default();
             let s = stream::iter(events.into_iter().map(Ok::<_, ProviderError>));
-            Ok(Box::pin(s) as Pin<Box<dyn futures_core::Stream<Item = _> + Send + 'static>>)
+            Ok(Box::pin(s)
+                as Pin<
+                    Box<dyn futures_core::Stream<Item = _> + Send + 'static>,
+                >)
         }
     }
 
@@ -733,11 +749,7 @@ mod tests {
                     detail: None,
                 }
             }
-            async fn call(
-                &self,
-                input: Value,
-                _ctx: ToolCtx,
-            ) -> Result<ToolOutput, ToolError> {
+            async fn call(&self, input: Value, _ctx: ToolCtx) -> Result<ToolOutput, ToolError> {
                 Ok(ToolOutput {
                     summary: format!("ok: {}", input["file_path"].as_str().unwrap_or("?")),
                     detail_path: None,
@@ -764,7 +776,9 @@ mod tests {
                 },
                 StreamEvent::ContentBlockDelta {
                     index: 0,
-                    delta: crate::provider::ContentDelta::InputJson(edit_input.to_string().into_bytes()),
+                    delta: crate::provider::ContentDelta::InputJson(
+                        edit_input.to_string().into_bytes(),
+                    ),
                 },
                 StreamEvent::ContentBlockStop { index: 0 },
                 StreamEvent::MessageDelta {
@@ -799,11 +813,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = mk_ctx(dir.path());
-        ctx.permission = PermissionSnapshot::new(
-            vec![],
-            vec![Rule::parse("Edit").unwrap()],
-            vec![],
-        );
+        ctx.permission =
+            PermissionSnapshot::new(vec![], vec![Rule::parse("Edit").unwrap()], vec![]);
 
         let out = run_turn(
             EngineInputs {
@@ -874,11 +885,7 @@ mod tests {
                     detail: None,
                 }
             }
-            async fn call(
-                &self,
-                _input: Value,
-                _ctx: ToolCtx,
-            ) -> Result<ToolOutput, ToolError> {
+            async fn call(&self, _input: Value, _ctx: ToolCtx) -> Result<ToolOutput, ToolError> {
                 Ok(ToolOutput {
                     summary: "echoed the thing\nsecond line".into(),
                     detail_path: None,
@@ -974,7 +981,9 @@ mod tests {
         let start = events
             .iter()
             .find_map(|e| match e {
-                TurnEvent::ToolCallStart { name, preview, .. } => Some((name.clone(), preview.clone())),
+                TurnEvent::ToolCallStart { name, preview, .. } => {
+                    Some((name.clone(), preview.clone()))
+                }
                 _ => None,
             })
             .expect("ToolCallStart not emitted");
@@ -985,7 +994,10 @@ mod tests {
             .iter()
             .find_map(|e| match e {
                 TurnEvent::ToolCallEnd {
-                    name, ok, summary_head, ..
+                    name,
+                    ok,
+                    summary_head,
+                    ..
                 } => Some((name.clone(), *ok, summary_head.clone())),
                 _ => None,
             })
@@ -1018,11 +1030,17 @@ mod tests {
             let s = stream::unfold(rx, |mut rx| async move {
                 rx.recv().await.map(|ev| (Ok::<_, ProviderError>(ev), rx))
             });
-            Ok(Box::pin(s) as Pin<Box<dyn futures_core::Stream<Item = _> + Send + 'static>>)
+            Ok(Box::pin(s)
+                as Pin<
+                    Box<dyn futures_core::Stream<Item = _> + Send + 'static>,
+                >)
         }
     }
 
-    fn mk_chan_provider() -> (Arc<ChanProvider>, tokio::sync::mpsc::UnboundedSender<StreamEvent>) {
+    fn mk_chan_provider() -> (
+        Arc<ChanProvider>,
+        tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+    ) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let p = Arc::new(ChanProvider {
             rx: Mutex::new(Some(rx)),
@@ -1095,7 +1113,9 @@ mod tests {
                 let partial = partial_assistant.expect("expected partial assistant");
                 assert!(matches!(partial.role, Role::Assistant));
                 assert_eq!(partial.content.len(), 1);
-                assert!(matches!(&partial.content[0], ContentBlock::Text { text, .. } if text == "partial reply"));
+                assert!(
+                    matches!(&partial.content[0], ContentBlock::Text { text, .. } if text == "partial reply")
+                );
                 // messages = [user, partial_assistant]
                 assert_eq!(messages.len(), 2);
             }

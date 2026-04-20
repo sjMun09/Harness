@@ -208,7 +208,9 @@ fn is_tool_results_only(m: &Message) -> bool {
 }
 
 fn count_turn_tokens(turn: &[Message], estimator: &dyn TokenEstimator) -> usize {
-    turn.iter().map(|m| count_message_tokens(m, estimator)).sum()
+    turn.iter()
+        .map(|m| count_message_tokens(m, estimator))
+        .sum()
 }
 
 fn count_message_tokens(m: &Message, estimator: &dyn TokenEstimator) -> usize {
@@ -375,7 +377,7 @@ mod tests {
         let msgs = vec![
             user("do a bunch of reads"),
             assistant_tool_use("tu1", "Read", json!({"file_path": "a.xml"})),
-            user_tool_result("tu1", "payload A " .repeat(20).trim().into()),
+            user_tool_result("tu1", "payload A ".repeat(20).trim()),
             assistant_text("read it"),
             user("short"),
             assistant_text("ok"),
@@ -425,12 +427,19 @@ mod tests {
         let pad = "w ".repeat(10);
         // 4 turns, drop 1 → "1 earlier turn"
         let msgs = vec![
-            user(&pad), assistant_text("a"),
-            user(&pad), assistant_text("b"),
-            user(&pad), assistant_text("c"),
-            user(&pad), assistant_text("d"),
+            user(&pad),
+            assistant_text("a"),
+            user(&pad),
+            assistant_text("b"),
+            user(&pad),
+            assistant_text("c"),
+            user(&pad),
+            assistant_text("d"),
         ];
-        let opts = CompactionOptions { target_tokens: 30, keep_recent_turns: 3 };
+        let opts = CompactionOptions {
+            target_tokens: 30,
+            keep_recent_turns: 3,
+        };
         let r = compact(&msgs, &WordEstimator, &opts);
         assert!(r.changed());
         assert_eq!(r.dropped_turns, 1);
@@ -448,7 +457,10 @@ mod tests {
         // Sanity: the helper must accept any TokenEstimator impl,
         // including the null fallback. No tokenizer disk I/O here.
         let msgs = vec![user("hi"), assistant_text("there")];
-        let opts = CompactionOptions { target_tokens: 1, keep_recent_turns: 1 };
+        let opts = CompactionOptions {
+            target_tokens: 1,
+            keep_recent_turns: 1,
+        };
         let r = compact(&msgs, &NullEstimator, &opts);
         // Floor of 1 + only 1 turn → no-op.
         assert!(!r.changed());
@@ -463,7 +475,10 @@ mod tests {
             msgs.push(user(&pad));
             msgs.push(assistant_text("a"));
         }
-        let opts = CompactionOptions { target_tokens: 18, keep_recent_turns: 1 };
+        let opts = CompactionOptions {
+            target_tokens: 18,
+            keep_recent_turns: 1,
+        };
         let r = compact(&msgs, &WordEstimator, &opts);
         assert!(r.changed());
         assert_eq!(r.kept_from_turn, Some(2));
@@ -471,7 +486,14 @@ mod tests {
 
     #[test]
     fn empty_input_is_noop() {
-        let r = compact(&[], &WordEstimator, &CompactionOptions { target_tokens: 1, keep_recent_turns: 1 });
+        let r = compact(
+            &[],
+            &WordEstimator,
+            &CompactionOptions {
+                target_tokens: 1,
+                keep_recent_turns: 1,
+            },
+        );
         assert!(!r.changed());
         assert!(r.messages.is_empty());
     }

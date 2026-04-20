@@ -100,8 +100,11 @@ async fn run_inner(
         permission_tx: perm_tx,
     };
     let cancel_for_engine = cancel.clone();
-    let engine_task =
-        tokio::spawn(async move { engine.start(initial_prompt, handle, cancel_for_engine).await });
+    let engine_task = tokio::spawn(async move {
+        engine
+            .start(initial_prompt, handle, cancel_for_engine)
+            .await
+    });
 
     // Spawn an OS-thread bridge for crossterm events so we can `select!` them.
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Event>();
@@ -250,4 +253,3 @@ impl EngineDriver for DemoEngine {
         })
     }
 }
-

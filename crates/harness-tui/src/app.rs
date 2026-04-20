@@ -233,7 +233,8 @@ impl TuiApp {
                 }
             }
             TurnEvent::Error { message } => {
-                self.scrollback.push(Entry::Notice(format!("error: {message}")));
+                self.scrollback
+                    .push(Entry::Notice(format!("error: {message}")));
                 self.status = format!("error: {message}");
             }
         }

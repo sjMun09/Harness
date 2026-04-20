@@ -339,17 +339,23 @@ async fn write_detail(session_id: &str, body: &str) -> Option<PathBuf> {
 fn parse_failure_summary(runner: TestRunner, combined: &str) -> Option<String> {
     let pattern = match runner {
         // cargo: `test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`
-        TestRunner::CargoTest => r"test result: (?:ok|FAILED)\. \d+ passed; \d+ failed(?:; \d+ ignored)?",
+        TestRunner::CargoTest => {
+            r"test result: (?:ok|FAILED)\. \d+ passed; \d+ failed(?:; \d+ ignored)?"
+        }
         // maven surefire: `Tests run: 12, Failures: 1, Errors: 0, Skipped: 0`
         TestRunner::MvnTest => r"Tests run: \d+, Failures: \d+, Errors: \d+(?:, Skipped: \d+)?",
         // pytest: `===== 3 failed, 2 passed in 0.12s =====` or `===== 5 passed in 0.04s =====`
-        TestRunner::Pytest => r"={2,}[^=\n]*?(?:\d+ (?:failed|passed|error|skipped)[^=\n]*)+ in [0-9.]+s[^=\n]*={2,}",
+        TestRunner::Pytest => {
+            r"={2,}[^=\n]*?(?:\d+ (?:failed|passed|error|skipped)[^=\n]*)+ in [0-9.]+s[^=\n]*={2,}"
+        }
         // vitest: `Test Files  1 failed | 2 passed (3)` or `Tests  5 passed (5)`
         TestRunner::Vitest => r"(?:Test Files|Tests)\s+[0-9]+[^\n]*",
         // jest: `Tests:       1 failed, 2 passed, 3 total`
         TestRunner::Jest => r"Tests:\s+[^\n]*\d+ total",
         // playwright: `  5 passed (1.2s)` or `  1 failed`
-        TestRunner::Playwright => r"\d+ (?:failed|passed|skipped|flaky)(?:[^\n]*\d+ (?:failed|passed|skipped|flaky))*",
+        TestRunner::Playwright => {
+            r"\d+ (?:failed|passed|skipped|flaky)(?:[^\n]*\d+ (?:failed|passed|skipped|flaky))*"
+        }
         TestRunner::Custom => return None,
     };
     let re = Regex::new(pattern).ok()?;
@@ -482,8 +488,7 @@ mod tests {
 
     #[test]
     fn parse_pytest_mixed() {
-        let out =
-            "================= 3 failed, 2 passed, 1 skipped in 0.42s =================\n";
+        let out = "================= 3 failed, 2 passed, 1 skipped in 0.42s =================\n";
         let got = parse_failure_summary(TestRunner::Pytest, out).unwrap();
         assert!(got.contains("3 failed"));
         assert!(got.contains("2 passed"));
@@ -670,10 +675,7 @@ mod tests {
     async fn custom_without_command_is_validation_error() {
         let dir = tempdir().unwrap();
         let err = TestTool
-            .call(
-                serde_json::json!({"runner": "custom"}),
-                ctx(dir.path()),
-            )
+            .call(serde_json::json!({"runner": "custom"}), ctx(dir.path()))
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Validation(_)));

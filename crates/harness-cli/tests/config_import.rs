@@ -44,7 +44,10 @@ fn only_user_settings() {
     );
     // both original allow rules appear in ask
     let ask_sources = rule_sources(&result.settings.permissions.ask);
-    assert!(ask_sources.contains(&"Read(**)"), "Read(**) should be in ask");
+    assert!(
+        ask_sources.contains(&"Read(**)"),
+        "Read(**) should be in ask"
+    );
     assert!(
         ask_sources.contains(&"Bash(git status)"),
         "Bash(git status) should be in ask"
@@ -98,7 +101,7 @@ fn both_settings_additive() {
     let deny_sources = rule_sources(&result.settings.permissions.deny);
     assert!(deny_sources.contains(&"Bash(rm -rf *)"), "deny missing");
 
-    assert_eq!(result.user_rule_count, 2);   // allow + ask from user
+    assert_eq!(result.user_rule_count, 2); // allow + ask from user
     assert_eq!(result.project_rule_count, 2); // allow + deny from project
 }
 
@@ -112,8 +115,8 @@ fn unparseable_rule_skipped_others_succeed() {
     let user = make_claude_json(
         &[
             "Read(**)",
-            "Bash(git log",                       // missing closing ')'
-            "mcp__server__tool(some/path/**)",    // unknown tool with a non-* glob arg
+            "Bash(git log",                    // missing closing ')'
+            "mcp__server__tool(some/path/**)", // unknown tool with a non-* glob arg
         ],
         &[],
         &[],
@@ -122,7 +125,10 @@ fn unparseable_rule_skipped_others_succeed() {
 
     // The parseable rule should appear in ask
     let ask_sources = rule_sources(&result.settings.permissions.ask);
-    assert!(ask_sources.contains(&"Read(**)"), "Read(**) should be in ask");
+    assert!(
+        ask_sources.contains(&"Read(**)"),
+        "Read(**) should be in ask"
+    );
 
     // The bad rules should NOT appear anywhere
     let all_sources: Vec<&str> = result
@@ -151,11 +157,7 @@ fn unparseable_rule_skipped_others_succeed() {
 
 #[test]
 fn allow_fully_downgraded_none_remain() {
-    let user = make_claude_json(
-        &["Read(**)", "Bash(git log)", "Write(**/*.md)"],
-        &[],
-        &[],
-    );
+    let user = make_claude_json(&["Read(**)", "Bash(git log)", "Write(**/*.md)"], &[], &[]);
     let result = run_import(Some(&user), None).unwrap();
 
     assert!(
@@ -170,11 +172,7 @@ fn allow_fully_downgraded_none_remain() {
 
 #[test]
 fn deny_preserved_verbatim() {
-    let user = make_claude_json(
-        &[],
-        &["Bash(rm -rf *)", "Write(/etc/**)"],
-        &[],
-    );
+    let user = make_claude_json(&[], &["Bash(rm -rf *)", "Write(/etc/**)"], &[]);
     let result = run_import(Some(&user), None).unwrap();
 
     assert!(result.settings.permissions.allow.is_empty());
@@ -213,7 +211,10 @@ fn hooks_and_env_not_imported() {
     assert!(result.skipped_env, "env should be flagged as skipped");
 
     // Output settings must have no hooks, no env keys that look like secrets
-    assert!(result.settings.hooks.is_empty(), "hooks must not be imported");
+    assert!(
+        result.settings.hooks.is_empty(),
+        "hooks must not be imported"
+    );
     // env_allow is the default safe list, not the Claude env block
     let default_env: Vec<String> = harness_core::config::DEFAULT_ENV_ALLOW
         .iter()

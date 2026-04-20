@@ -109,7 +109,9 @@ fn is_binary(bytes: &[u8]) -> bool {
     // UTF-8 continuation-safe range.
     let nonprint = sample
         .iter()
-        .filter(|&&b| !(b == b'\t' || b == b'\n' || b == b'\r' || (0x20..=0x7e).contains(&b) || b >= 0x80))
+        .filter(|&&b| {
+            !(b == b'\t' || b == b'\n' || b == b'\r' || (0x20..=0x7e).contains(&b) || b >= 0x80)
+        })
         .count();
     nonprint * 10 >= sample.len() * 3
 }
@@ -143,9 +145,9 @@ fn path_error_to_tool_error(e: PathError) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use harness_core::HookDispatcher;
     use harness_perm::PermissionSnapshot;
     use harness_proto::SessionId;
-    use harness_core::HookDispatcher;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
@@ -168,10 +170,7 @@ mod tests {
         let f = dir.path().join("a.txt");
         tokio::fs::write(&f, "one\ntwo\nthree\n").await.unwrap();
         let out = ReadTool
-            .call(
-                serde_json::json!({ "file_path": "a.txt" }),
-                ctx(dir.path()),
-            )
+            .call(serde_json::json!({ "file_path": "a.txt" }), ctx(dir.path()))
             .await
             .unwrap();
         assert!(out.summary.contains("     1\tone"));
@@ -238,6 +237,9 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::PermissionDenied(_) | ToolError::Io(_)));
+        assert!(matches!(
+            err,
+            ToolError::PermissionDenied(_) | ToolError::Io(_)
+        ));
     }
 }

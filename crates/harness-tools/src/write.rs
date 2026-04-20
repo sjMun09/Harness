@@ -78,8 +78,8 @@ impl Tool for WriteTool {
             .to_os_string();
         let parent = target.parent().unwrap_or_else(|| Path::new("."));
 
-        let canonical_parent = canonicalize_within(&ctx.cwd, parent)
-            .map_err(path_error_to_tool_error)?;
+        let canonical_parent =
+            canonicalize_within(&ctx.cwd, parent).map_err(path_error_to_tool_error)?;
         tokio::fs::create_dir_all(&canonical_parent).await?;
 
         let final_path = canonical_parent.join(&file_name);
@@ -138,11 +138,7 @@ fn path_error_to_tool_error(e: PathError) -> ToolError {
 /// the probe and the rename — closing the TOCTOU window on create-new.
 /// When the caller is intentionally overwriting (`existed_before == true`)
 /// or on non-Linux, use plain `rename`, which preserves the overwrite path.
-async fn atomic_rename(
-    tmp: &Path,
-    dst: &Path,
-    existed_before: bool,
-) -> Result<(), ToolError> {
+async fn atomic_rename(tmp: &Path, dst: &Path, existed_before: bool) -> Result<(), ToolError> {
     #[cfg(target_os = "linux")]
     {
         if !existed_before {
@@ -163,12 +159,10 @@ async fn atomic_rename(
                     // RENAME_NOREPLACE — fall back to plain rename.
                     tokio::fs::rename(tmp, dst).await.map_err(ToolError::Io)
                 }
-                Err(e) if e.raw_os_error() == libc::EEXIST => {
-                    Err(ToolError::Other(format!(
-                        "refusing to overwrite {} (appeared between check and write)",
-                        dst.display()
-                    )))
-                }
+                Err(e) if e.raw_os_error() == libc::EEXIST => Err(ToolError::Other(format!(
+                    "refusing to overwrite {} (appeared between check and write)",
+                    dst.display()
+                ))),
                 Err(e) => Err(ToolError::Io(std::io::Error::from_raw_os_error(
                     e.raw_os_error(),
                 ))),
@@ -213,7 +207,9 @@ mod tests {
             .await
             .unwrap();
         assert!(out.summary.contains("wrote 5 bytes"));
-        let got = tokio::fs::read_to_string(dir.path().join("new.txt")).await.unwrap();
+        let got = tokio::fs::read_to_string(dir.path().join("new.txt"))
+            .await
+            .unwrap();
         assert_eq!(got, "hello");
     }
 
@@ -240,7 +236,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::PermissionDenied(_) | ToolError::Io(_)));
+        assert!(matches!(
+            err,
+            ToolError::PermissionDenied(_) | ToolError::Io(_)
+        ));
     }
 
     /// Drive the `atomic_rename` helper directly with `existed_before=false`

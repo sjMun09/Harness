@@ -41,8 +41,13 @@ pub const SUBAGENT_MAX_DEPTH: u32 = 1;
 pub const SUBAGENT_BANNED_TOOLS: &[&str] = &["Bash", "Subagent"];
 
 /// Default allowlist when the caller doesn't specify one: read-only exploration.
-pub const SUBAGENT_DEFAULT_ALLOWLIST: &[&str] =
-    &["Read", "Glob", "Grep", "ImportTrace", "MyBatisDynamicParser"];
+pub const SUBAGENT_DEFAULT_ALLOWLIST: &[&str] = &[
+    "Read",
+    "Glob",
+    "Grep",
+    "ImportTrace",
+    "MyBatisDynamicParser",
+];
 
 /// The parent's ask passed verbatim to the host.
 #[derive(Debug, Clone)]
@@ -158,11 +163,7 @@ mod tests {
 
     #[test]
     fn sanitize_deduplicates() {
-        let out = sanitize_allowlist(Some(vec![
-            "Read".into(),
-            "Read".into(),
-            "Grep".into(),
-        ]));
+        let out = sanitize_allowlist(Some(vec!["Read".into(), "Read".into(), "Grep".into()]));
         assert_eq!(out, vec!["Read".to_string(), "Grep".to_string()]);
     }
 

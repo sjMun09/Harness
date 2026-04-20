@@ -245,8 +245,7 @@ pub async fn cmd_config_import_impl() -> anyhow::Result<()> {
 
     // Serialize and write.
     let json = serde_json::to_string_pretty(&result.settings).context("serialize settings")?;
-    std::fs::write(&out_path, &json)
-        .with_context(|| format!("write {}", out_path.display()))?;
+    std::fs::write(&out_path, &json).with_context(|| format!("write {}", out_path.display()))?;
 
     // Set file mode 0600 on unix.
     #[cfg(unix)]

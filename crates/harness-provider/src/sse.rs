@@ -111,7 +111,10 @@ fn find_frame_end(haystack: &[u8]) -> Option<(usize, usize)> {
     if let Some(i) = haystack.windows(4).position(|w| w == b"\r\n\r\n") {
         return Some((i, 4));
     }
-    haystack.windows(2).position(|w| w == b"\n\n").map(|i| (i, 2))
+    haystack
+        .windows(2)
+        .position(|w| w == b"\n\n")
+        .map(|i| (i, 2))
 }
 
 /// Parse a complete SSE frame (without the terminator). Returns:

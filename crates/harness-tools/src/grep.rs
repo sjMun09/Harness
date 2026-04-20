@@ -88,8 +88,9 @@ impl Tool for GrepTool {
     async fn call(&self, input: Value, ctx: ToolCtx) -> Result<ToolOutput, ToolError> {
         let gi: GrepInput = parse_input(input, "Grep")?;
         let search_root = match gi.path.as_deref() {
-            Some(p) => canonicalize_within(&ctx.cwd, Path::new(p))
-                .map_err(path_error_to_tool_error)?,
+            Some(p) => {
+                canonicalize_within(&ctx.cwd, Path::new(p)).map_err(path_error_to_tool_error)?
+            }
             None => ctx.cwd.canonicalize().map_err(ToolError::Io)?,
         };
 
@@ -169,7 +170,9 @@ fn run_search(
             break;
         }
         let Ok(entry) = entry else { continue };
-        let Some(ft) = entry.file_type() else { continue };
+        let Some(ft) = entry.file_type() else {
+            continue;
+        };
         if !ft.is_file() {
             continue;
         }
@@ -183,10 +186,14 @@ fn run_search(
         match mode {
             GrepMode::FilesWithMatches => {
                 let mut matched = false;
-                let _ = searcher.search_path(matcher, path, UTF8(|_, _| {
-                    matched = true;
-                    Ok(false)
-                }));
+                let _ = searcher.search_path(
+                    matcher,
+                    path,
+                    UTF8(|_, _| {
+                        matched = true;
+                        Ok(false)
+                    }),
+                );
                 if matched {
                     out.push(path.display().to_string());
                     count.fetch_add(1, Ordering::Relaxed);
@@ -194,10 +201,14 @@ fn run_search(
             }
             GrepMode::Count => {
                 let mut n: u64 = 0;
-                let _ = searcher.search_path(matcher, path, UTF8(|_, _| {
-                    n += 1;
-                    Ok(true)
-                }));
+                let _ = searcher.search_path(
+                    matcher,
+                    path,
+                    UTF8(|_, _| {
+                        n += 1;
+                        Ok(true)
+                    }),
+                );
                 if n > 0 {
                     out.push(format!("{}:{n}", path.display()));
                     count.fetch_add(1, Ordering::Relaxed);
@@ -206,11 +217,15 @@ fn run_search(
             GrepMode::Content => {
                 let pb: PathBuf = path.to_path_buf();
                 let mut hits: Vec<String> = Vec::new();
-                let _ = searcher.search_path(matcher, path, UTF8(|lnum, line| {
-                    let trimmed = line.trim_end_matches('\n');
-                    hits.push(format!("{}:{lnum}:{trimmed}", pb.display()));
-                    Ok(hits.len() < MAX_GREP_RESULTS)
-                }));
+                let _ = searcher.search_path(
+                    matcher,
+                    path,
+                    UTF8(|lnum, line| {
+                        let trimmed = line.trim_end_matches('\n');
+                        hits.push(format!("{}:{lnum}:{trimmed}", pb.display()));
+                        Ok(hits.len() < MAX_GREP_RESULTS)
+                    }),
+                );
                 for h in hits {
                     if count.load(Ordering::Relaxed) >= MAX_GREP_RESULTS {
                         break;
@@ -259,13 +274,14 @@ mod tests {
     #[tokio::test]
     async fn files_with_matches_mode() {
         let dir = tempdir().unwrap();
-        tokio::fs::write(dir.path().join("a.txt"), "TODO: fix").await.unwrap();
-        tokio::fs::write(dir.path().join("b.txt"), "no marker").await.unwrap();
+        tokio::fs::write(dir.path().join("a.txt"), "TODO: fix")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("b.txt"), "no marker")
+            .await
+            .unwrap();
         let out = GrepTool
-            .call(
-                serde_json::json!({ "pattern": "TODO" }),
-                ctx(dir.path()),
-            )
+            .call(serde_json::json!({ "pattern": "TODO" }), ctx(dir.path()))
             .await
             .unwrap();
         assert!(out.summary.contains("a.txt"));
@@ -310,12 +326,11 @@ mod tests {
     #[tokio::test]
     async fn fence_tag_present_in_grep_output() {
         let dir = tempdir().unwrap();
-        tokio::fs::write(dir.path().join("z.txt"), "needle").await.unwrap();
+        tokio::fs::write(dir.path().join("z.txt"), "needle")
+            .await
+            .unwrap();
         let out = GrepTool
-            .call(
-                serde_json::json!({ "pattern": "needle" }),
-                ctx(dir.path()),
-            )
+            .call(serde_json::json!({ "pattern": "needle" }), ctx(dir.path()))
             .await
             .unwrap();
         assert!(out.summary.contains("<untrusted_tool_output tool=\"Grep\""));
@@ -325,7 +340,9 @@ mod tests {
     #[tokio::test]
     async fn case_insensitive_flag() {
         let dir = tempdir().unwrap();
-        tokio::fs::write(dir.path().join("a.txt"), "HELLO").await.unwrap();
+        tokio::fs::write(dir.path().join("a.txt"), "HELLO")
+            .await
+            .unwrap();
         let out = GrepTool
             .call(
                 serde_json::json!({ "pattern": "hello", "-i": true }),

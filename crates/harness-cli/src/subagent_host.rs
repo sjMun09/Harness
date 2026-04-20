@@ -47,6 +47,7 @@ impl std::fmt::Debug for CliSubagentHost {
 }
 
 impl CliSubagentHost {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: Arc<dyn Provider>,
         tools: Vec<Arc<dyn Tool>>,

@@ -25,7 +25,9 @@ pub mod input;
 pub mod markdown;
 pub mod render;
 
-pub use app::{EngineHandle, Entry, PermissionModal, PermissionRequest, ToolCard, ToolStatus, TuiApp};
+pub use app::{
+    EngineHandle, Entry, PermissionModal, PermissionRequest, ToolCard, ToolStatus, TuiApp,
+};
 pub use event::{PermissionResponse, TurnEndReason, TurnEvent};
 pub use event_loop::{DemoEngine, EngineDriver};
 

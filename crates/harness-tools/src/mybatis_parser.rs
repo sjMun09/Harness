@@ -83,9 +83,9 @@ impl Tool for MyBatisDynamicParserTool {
         let file_a = canonicalize_within(&ctx.cwd, Path::new(&inp.file_path))
             .map_err(path_err_to_tool_err)?;
         let file_b = match inp.compare_to.as_deref() {
-            Some(p) => Some(
-                canonicalize_within(&ctx.cwd, Path::new(p)).map_err(path_err_to_tool_err)?,
-            ),
+            Some(p) => {
+                Some(canonicalize_within(&ctx.cwd, Path::new(p)).map_err(path_err_to_tool_err)?)
+            }
             None => None,
         };
         let sql_id = inp.sql_id.clone();
@@ -431,9 +431,7 @@ pub fn normalize_condition(s: &str) -> String {
 
 fn not_null_re() -> &'static regex::Regex {
     static R: OnceLock<regex::Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        regex::Regex::new(r"(?i)([\w.$]+)\s*!=\s*null").expect("not_null re compiles")
-    })
+    R.get_or_init(|| regex::Regex::new(r"(?i)([\w.$]+)\s*!=\s*null").expect("not_null re compiles"))
 }
 
 fn is_null_re() -> &'static regex::Regex {
@@ -830,7 +828,8 @@ mod tests {
 
     #[test]
     fn handles_cdata_as_text() {
-        let xml = r#"<mapper><select id="f">select <![CDATA[ * from t where a < 1 ]]></select></mapper>"#;
+        let xml =
+            r#"<mapper><select id="f">select <![CDATA[ * from t where a < 1 ]]></select></mapper>"#;
         let stmts = parse(xml);
         assert_eq!(stmts.len(), 1);
         let has_text = stmts[0]

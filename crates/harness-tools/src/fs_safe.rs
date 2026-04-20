@@ -119,15 +119,15 @@ fn openat2_verify(canonical_root: &Path, canonical: &Path) -> Result<(), PathErr
             return Ok(());
         }
         Err(e) => {
-            return Err(PathError::Io(io::Error::from_raw_os_error(e.raw_os_error())));
+            return Err(PathError::Io(io::Error::from_raw_os_error(
+                e.raw_os_error(),
+            )));
         }
     };
 
     // Compute the suffix under canonical_root. `strip_prefix` is guaranteed
     // to succeed because containment was just verified.
-    let rel = probe
-        .strip_prefix(canonical_root)
-        .unwrap_or(Path::new("."));
+    let rel = probe.strip_prefix(canonical_root).unwrap_or(Path::new("."));
     let rel_os = rel.as_os_str();
     let rel_for_open: &std::ffi::OsStr = if rel_os.is_empty() {
         std::ffi::OsStr::new(".")
@@ -180,7 +180,13 @@ pub fn canonicalize_parent_within(
 ) -> Result<(PathBuf, std::ffi::OsString), PathError> {
     let file_name = target
         .file_name()
-        .ok_or_else(|| path_io("no file name", target, io::Error::from(io::ErrorKind::InvalidInput)))?
+        .ok_or_else(|| {
+            path_io(
+                "no file name",
+                target,
+                io::Error::from(io::ErrorKind::InvalidInput),
+            )
+        })?
         .to_os_string();
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     let canonical_parent = canonicalize_within(root, parent)?;
@@ -363,7 +369,10 @@ mod tests {
 
         let err = openat2_verify(&canonical_root, &fake_canonical).unwrap_err();
         assert!(
-            matches!(err, PathError::SymlinkBlocked(_) | PathError::Escapes(_) | PathError::Denied(_)),
+            matches!(
+                err,
+                PathError::SymlinkBlocked(_) | PathError::Escapes(_) | PathError::Denied(_)
+            ),
             "expected SymlinkBlocked/Escapes/Denied, got {err:?}"
         );
     }
