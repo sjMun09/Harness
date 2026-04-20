@@ -1,0 +1,78 @@
+# Layer 3 of the Harness branch-protection stack.
+#
+# ALARM ONLY — detects when a commit lands on main/dev/qa without an
+# associated merged PR and fails the workflow + opens a policy-violation
+# issue. Does NOT auto-revert (intentionally; auto-rewriting history on
+# protected branches is more dangerous than the problem it solves for a
+# solo operator).
+#
+# Visibility gate: this workflow runs ONLY when the repo is PUBLIC.
+# runupcompany's repos are private and on the Free plan — classic Branch
+# Protection and Rulesets API are both 403-gated for private+Free, so
+# Actions is the only server-side option. But Actions on private repos
+# consumes the org's monthly free-minutes quota, and the team hasn't been
+# running Actions, so we gate on `repository.private == false`: if a repo
+# is ever flipped to public, the alarm auto-activates without any
+# additional wiring. For private repos the workflow still exists on disk
+# (self-documenting policy) but every run skips instantly.
+#
+# Drop this file at `.github/workflows/enforce-pr-only.yml` in any repo
+# you want gated.
+#
+# Upgrade path: when the runupcompany org moves to GitHub Team, replace
+# this alarm with a proper Branch Protection or Ruleset via
+# `gh api -X PUT repos/.../branches/<branch>/protection` — see
+# templates/settings/README.md §"Upgrade path".
+name: enforce-pr-only
+
+on:
+  push:
+    branches: [main, dev, qa]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+jobs:
+  verify-merged-via-pr:
+    # Only fire on PUBLIC repos. Private repos skip instantly so the
+    # workflow is a no-op against private-Free billing.
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Check that the head commit landed via a merged PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          sha="${{ github.event.after }}"
+          branch="${{ github.ref_name }}"
+          actor="${{ github.actor }}"
+
+          pr_count=$(gh api "repos/${{ github.repository }}/commits/$sha/pulls" \
+            --jq "[.[] | select(.merged_at != null and .base.ref == \"$branch\")] | length")
+
+          if [ "$pr_count" = "0" ]; then
+            echo "::error title=Policy violation::Direct push to '$branch' by $actor (sha=$sha) — no merged PR associated."
+
+            gh issue create \
+              --title "Policy violation: direct push to $branch" \
+              --body "**Actor**: $actor
+          **Branch**: $branch
+          **SHA**: $sha
+          **Run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          This commit landed on a protected branch without a merged pull request. Policy requires all changes to protected branches to go through PR + review.
+
+          If this was intentional (emergency hotfix, force-push recovery, etc.), close this issue with a short explanation. Otherwise consider reverting via \`gh pr create\` and merging the revert through the normal flow." \
+              || echo "::warning::could not open issue (token scope?)"
+
+            exit 1
+          fi
+
+          echo "ok — sha $sha landed via merged PR."

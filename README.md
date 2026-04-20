@@ -391,6 +391,40 @@ Claude Code 의 hook 모델과 호환. 4 이벤트 지원:
 
 ---
 
+## 회사 레포 배포 (`templates/settings/`)
+
+`runupcompany` 의 12 개 레포에 같은 정책을 적용하기 위한 per-language `settings.json` 템플릿 + 브랜치 보호 3-layer 스택을 `templates/settings/` 에 번들로 제공합니다.
+
+- **7 개 언어별 템플릿** (`java.json` / `typescript.json` / `python.json` / `plpgsql.json` / `ansible.json` / `generic.json` + 레퍼런스용 `_base.json`) — 각 레포는 자신 언어에 맞는 파일을 `.harness/settings.json` 으로 복사.
+- **분류 원칙** — 읽기는 항상 `allow`, 파일·DB·인프라 쓰기는 `ask`, 시크릿·force-push·destroy 는 `deny`. DB (plpgsql) 쓰기는 별도 hook 으로 **ask TWICE**. 자세한 분류·배포 커맨드는 [`templates/settings/README.md`](templates/settings/README.md).
+- **인프라/클라우드 게이트** — `terraform apply` · `kubectl apply|delete|exec` · `helm install|upgrade|uninstall` · `docker rm|rmi|system prune` · `aws s3 rm|cp|sync` · `aws iam` · `gcloud iam` · `gh release create` · `gh workflow run` · `gh secret set` 등은 `ask`. `terraform destroy` · `docker push` · `docker run --privileged` 등은 `deny`. 읽기 커맨드(`terraform plan`, `kubectl get`, `helm list`, `docker ps`, `aws s3 ls`, ...)는 `allow`.
+
+### 브랜치 보호 — 3-layer 스택 (`main` / `dev` / `qa` 직접 push 금지)
+
+GitHub 서버 측 Branch Protection API (classic + Rulesets) 는 private repo 의 경우 GitHub Team 플랜부터 사용 가능합니다. `runupcompany` 는 Free 플랜이라 두 API 모두 HTTP 403 입니다. 대신 다음 3 layer 로 "protected branch 직접 push 금지" 를 시뮬레이션합니다.
+
+1. **Layer 1 · Client-side git pre-push hook** (`scripts/git-hooks/pre-push`)
+   - git 이 push packet 을 전송하기 **직전** 로컬에서 실행되는 hook.
+   - refspec 을 파싱해서 `main`/`dev`/`qa`/`master`/`release*` 로 가는 push (force-push · delete 포함) 를 거부.
+   - 활성화: `git config core.hooksPath scripts/git-hooks` (레포마다 한 번).
+   - 비상 우회: `git push --no-verify`. 이 경우 Layer 3 알람이 대신 걸림 (public repo 한정).
+2. **Layer 2 · Harness PreToolUse guard** (`templates/settings/hooks/git_push_guard.sh`)
+   - Harness 가 `Bash(git push ...)` 를 호출할 때 tool dispatch 직전에 동작하는 hook.
+   - **왜 Layer 2 가 따로 필요한가**: Harness 의 권한 grammar (`crates/harness-perm/src/lib.rs:152`) 는 **shlex token-prefix** 매칭이라 `Bash(git push origin main)` 과 `Bash(git push origin feature/x)` 를 구분할 수 없음. Rule 로는 허용/거부를 쓸 수 없어서 hook 에서 argv + refspec 을 직접 파싱.
+   - env 선언 (`FOO=1 git push ...`), 전체 경로 (`/usr/bin/git push`), `-C <dir>` prefix, `;`/`&&`/`||`/newline 으로 체이닝된 push, `refs/heads/<name>` 포맷, `HEAD:main` 타입의 refspec 모두 감지. `--all`/`--mirror`/`--tags` 는 refspec 없이도 protected ref 를 움직일 수 있어 무조건 block. 현재 브랜치가 protected 이면 bare `git push` 도 block.
+   - 빈 payload 는 **fail-closed** (block). Settings 에서 `on_timeout: "deny"` 로 timeout 시에도 거부.
+3. **Layer 3 · GitHub Actions 알람** (`templates/github/enforce-pr-only.yml`)
+   - push 가 `main`/`dev`/`qa` 에 도달한 **후** 서버에서 실행. head commit 에 merged PR 이 연결돼 있지 않으면 workflow 를 fail 시키고 policy-violation issue 를 오픈.
+   - **Private repo 에서는 Actions 가 돌지 않습니다.** workflow 의 단일 job 은 `if: ${{ github.event.repository.private == false }}` 로 게이트되어 있어, private 상태에서는 즉시 skip (0 분 소비). `runupcompany` 의 모든 레포는 현재 private + Free 플랜이고, Actions 의 2 000 min/월 무료 쿼터를 정책 강제만을 위해 소모하고 싶지 않기 때문. 레포가 public 으로 뒤집히면 게이트가 자동으로 참이 되며 별도 설정 없이 알람이 활성화.
+
+**세 layer 의 관계:** Layer 1 은 로컬 일반 터미널의 "실수 push" 를 막고, Layer 2 는 Harness 내부에서 feature/\* 는 허용·main 은 거부라는 세분화를 달성하며, Layer 3 은 `--no-verify` + public repo 로 노출된 case 의 backstop. 셋 중 어느 하나도 단독으로는 충분하지 않지만, 함께 쓰면 "main 에 직접 push 한다" 라는 행위가 **누군가 그 위에 merge 하기 전에** 알아챌 수 있을 만큼 비싸집니다.
+
+**의도적으로 auto-revert 는 하지 않음**: Layer 3 이 위반된 commit 을 자동으로 revert 하면 solo-operator 가 `main` 위에서 이미 다음 작업을 하고 있을 때 더 많은 손실을 일으킬 수 있어 알람만 오픈.
+
+`runupcompany` 가 향후 Team tier 로 올라가면 위 3 layer 중 Layer 3 만 실제 Ruleset 으로 교체하고 workflow 를 삭제합니다. Layer 1 · 2 는 defence-in-depth 로 유지. 예상 Ruleset JSON 은 `templates/settings/README.md` §"Upgrade path" 참고.
+
+---
+
 ## 아키텍처
 
 ```

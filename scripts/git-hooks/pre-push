@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Layer 1 of the Harness branch-protection stack.
+#
+# Refuses pushes (incl. force-push and delete) to protected branches
+# (main / dev / qa / master / release*). Runs on the client, before git
+# sends the push packet — catches both Harness-driven and human pushes.
+#
+# Activate per repo:
+#     git config core.hooksPath scripts/git-hooks
+#
+# Emergency bypass (leaves a trail in Layer 3 if the repo is public):
+#     git push --no-verify
+#
+# stdin (git-push docs): one line per ref — `<local_ref> <local_sha> <remote_ref> <remote_sha>`
+# On delete: local_sha is 40 zeros. Force-push: local_ref starts with '+'.
+set -eu
+
+protected='^refs/heads/(main|dev|qa|master|release(/.*)?)$'
+zero='0000000000000000000000000000000000000000'
+
+# Pin IFS so columns don't desync from ambient shell state.
+while IFS=' ' read -r local_ref local_sha remote_ref _remote_sha; do
+  [ -z "${remote_ref:-}" ] && continue
+
+  if [[ "$remote_ref" =~ $protected ]]; then
+    branch="${remote_ref#refs/heads/}"
+    op="push"
+    [ "${local_sha:-}" = "$zero" ] && op="delete"
+    [ "${local_ref#+}" != "${local_ref:-}" ] && op="force-push"
+    {
+      echo ""
+      echo "✗ Refusing $op to protected branch '$branch'."
+      echo ""
+      echo "  Protected branches: main, dev, qa, master, release*"
+      echo "  Open a PR from a feature branch instead:"
+      echo ""
+      echo "      git switch -c feature/<your-work>"
+      echo "      git push -u origin feature/<your-work>"
+      echo "      gh pr create --base $branch"
+      echo ""
+      echo "  (Emergency bypass: git push --no-verify)"
+      echo ""
+    } >&2
+    exit 1
+  fi
+done
+
+exit 0

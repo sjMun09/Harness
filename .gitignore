@@ -11,3 +11,6 @@
 # Env
 .env
 .env.local
+
+# Claude Code local worktree state (ad-hoc subagent scratch dirs)
+.claude/worktrees/
