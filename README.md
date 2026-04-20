@@ -279,7 +279,7 @@ assistant 가 turn 중에 자연어 + tool_use 블록으로 호출할 수 있는
 | **Read** | 파일 읽기 | mmap, `cat -n` 포맷, 바이너리 자동 감지 / 거부, 크기 cap(20k 라인) |
 | **Write** | 새 파일 쓰기 / 디렉터리 자동 생성 | tempfile + `renameat2(RENAME_NOREPLACE)` (Linux), `0600` perm |
 | **Edit** | 정확 치환 | unique 검증 + `replace_all` 옵션 + unified diff 반환. 위험 경로(XML/ftl/migrations/schema)는 plan-gate 통과 후 2회차만 허용 |
-| **Bash** | 명령 실행 | **argv 모드 기본**(shell injection 차단), `mode: "shell"` 명시 opt-in, `setsid` + 타임아웃 120s/600s, env allowlist(`PATH/HOME/LANG/TERM/USER` 만), stdout+stderr head 4KB + tail 4KB + `/tmp/harness-bash-*.log` 전체 로그 경로 |
+| **Bash** | 명령 실행 | **argv 모드 기본**(shell injection 차단), `mode: "shell"` 명시 opt-in, `setsid` + 타임아웃 120s/600s, env allowlist(핵심 shell/XDG/ssh-agent/git-identity/language-toolchain 약 40종 — 시크릿 값이 들어가는 변수는 배제, `bash.rs::DEFAULT_ENV_ALLOW` 참조), stdout+stderr head 4KB + tail 4KB + `/tmp/harness-bash-*.log` 전체 로그 경로 |
 | **BashOutput** | 백그라운드 작업 polling | `Bash(run_in_background=true)` 로 띄운 shell 의 신규 output 증분 drain. 선택적 regex `filter` 로 라인 필터. ring buffer(head 4KB + tail 4KB + consumer cursor) |
 | **KillShell** | 백그라운드 작업 종료 | SIGTERM → 2s → SIGKILL 에스컬레이션, `PR_SET_PDEATHSIG`(Linux) |
 | **Glob** | 파일 패턴 검색 | `ignore`(gitignore 존중) + `globset` |
@@ -380,7 +380,7 @@ Claude Code 의 hook 모델과 호환. 4 이벤트 지원:
 
 ## 안전 모델 (PLAN §8.2)
 
-1. **Bash env allowlist** — `PATH/HOME/LANG/TERM/USER` 외 모든 환경 변수(`ANTHROPIC_API_KEY`, `AWS_*`, `GITHUB_TOKEN`, ...) 를 child 프로세스에서 제거
+1. **Bash env allowlist** — 핵심 shell/XDG/ssh-agent/git-identity/language-toolchain 변수 약 40 종(PATH, HOME, LANG, LC_ALL, TERM, USER, LOGNAME, SHELL, TMPDIR, TZ, XDG_*, SSH_AUTH_SOCK, GIT_AUTHOR_* · GIT_COMMITTER_*, JAVA_HOME, NODE_ENV, VIRTUAL_ENV, CARGO_HOME 등) 만 통과. 값이 credential 이 될 수 있는 변수(`ANTHROPIC_API_KEY`, `AWS_*`, `GITHUB_TOKEN`, `*_PASSWORD`, ...) 는 child 프로세스에서 제거. 전체 목록은 `crates/harness-tools/src/bash.rs::DEFAULT_ENV_ALLOW`.
 2. **경로 canonicalize** — `Read/Write/Edit` 는 `canonicalize_within` 으로 심링크 탈출 차단, `DENY_PATH_PREFIXES`(`/etc`, `/sys`, 홈 디렉터리의 `.ssh` 등) 스캔
 3. **첫 로드 cwd 트러스트 프롬프트** — 새 디렉터리에서 처음 띄우면 "이 레포를 신뢰합니까?" 프롬프트 (`--trust-cwd` 로 생략)
 4. **PreEdit plan-gate** — XML / Freemarker / migrations / schema 패턴에 대한 첫 Edit/Write 는 block → plan(Files/Changes/Why/Risks) 작성 후 재시도 시 통과

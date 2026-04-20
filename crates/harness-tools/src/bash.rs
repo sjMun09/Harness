@@ -20,7 +20,62 @@ use crate::proc::graceful_kill_pgid;
 /// Env allowlist — PLAN §8.2. Everything else
 /// (`ANTHROPIC_API_KEY`, `AWS_*`, `GITHUB_TOKEN`, ...) is stripped from
 /// the child env before exec.
-pub const DEFAULT_ENV_ALLOW: &[&str] = &["PATH", "HOME", "LANG", "TERM", "USER"];
+///
+/// Rule for adding to this list: **paths and non-secret toggles only**.
+/// If the variable's *value* could itself be a credential (API key, token,
+/// password, vault path, connection string), it must NEVER be allowlisted
+/// here — users can whitelist at invocation (`FOO=bar harness ask ...`) or
+/// via a per-repo hook.
+pub const DEFAULT_ENV_ALLOW: &[&str] = &[
+    // core shell / identity
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMPDIR",
+    "TZ",
+    // XDG base dirs
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_RUNTIME_DIR",
+    // color / tty hints
+    "COLORTERM",
+    "NO_COLOR",
+    "CLICOLOR",
+    "CLICOLOR_FORCE",
+    "FORCE_COLOR",
+    // ssh-agent — needed for git-over-ssh and ansible ssh-read
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    // git identity (non-secret)
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+    "GIT_CONFIG_GLOBAL",
+    // language toolchain roots — paths only, never credentials
+    "JAVA_HOME",
+    "MAVEN_HOME",
+    "GRADLE_HOME",
+    "NODE_ENV",
+    "NVM_DIR",
+    "PNPM_HOME",
+    "VIRTUAL_ENV",
+    "PYTHONPATH",
+    "PYENV_ROOT",
+    "POETRY_HOME",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    // docker/k8s context paths (non-secret)
+    "DOCKER_HOST",
+    "DOCKER_CONFIG",
+];
 
 pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
 pub const MAX_TIMEOUT_SECS: u64 = 600;
