@@ -5,6 +5,7 @@
 
 mod config_import;
 mod line_mode;
+mod metrics;
 mod redact;
 mod subagent_host;
 mod trust;
@@ -145,6 +146,10 @@ enum Cmd {
         /// Cap on turn-loop iterations.
         #[arg(long, default_value_t = DEFAULT_MAX_TURNS)]
         max_turns: u32,
+        /// Write strict JSON run metrics to this path after the turn loop
+        /// finishes (atomic tmp+rename). Omit for no metrics output.
+        #[arg(long, value_name = "PATH")]
+        metrics_json: Option<PathBuf>,
     },
     /// Session management.
     #[command(subcommand)]
@@ -201,7 +206,11 @@ async fn main() -> ExitCode {
     let tui = false;
 
     let result = match cli.cmd {
-        Cmd::Ask { prompt, max_turns } => match resolve_prompt(prompt, "ask").await {
+        Cmd::Ask {
+            prompt,
+            max_turns,
+            metrics_json,
+        } => match resolve_prompt(prompt, "ask").await {
             Ok(prompt) => {
                 cmd_ask(
                     prompt,
@@ -212,6 +221,7 @@ async fn main() -> ExitCode {
                     cli.trust_cwd,
                     tui,
                     cli.base_url.clone(),
+                    metrics_json,
                 )
                 .await
             }
@@ -323,6 +333,7 @@ async fn cmd_ask(
     trust_cwd: bool,
     tui: bool,
     base_url: Option<String>,
+    metrics_json: Option<PathBuf>,
 ) -> anyhow::Result<SessionExit> {
     let settings = harness_core::config::load().context("load settings")?;
     let model = pick_model(&settings, model_override.as_deref());
@@ -333,6 +344,13 @@ async fn cmd_ask(
     harness_mem::init(&session_path, &header)
         .await
         .context("init session file")?;
+
+    // Hash the raw prompt bytes up-front — the prompt is consumed when we
+    // build the initial user Message. Captured here so the metrics path
+    // can emit it regardless of whether the turn loop succeeds or fails.
+    let prompt_hash = metrics_json
+        .as_ref()
+        .map(|_| metrics::prompt_sha256(&prompt));
 
     let run = SessionRun {
         settings,
@@ -346,6 +364,8 @@ async fn cmd_ask(
         auth,
         trust_cwd,
         base_url,
+        metrics_json,
+        prompt_sha256: prompt_hash,
     };
 
     if tui {
@@ -384,6 +404,13 @@ struct SessionRun {
     dangerously_skip_permissions: bool,
     auth: AuthChoice,
     base_url: Option<String>,
+    /// When `Some`, a strict JSON metrics file is written to this path
+    /// after the turn loop finishes (atomic tmp+rename). Line-mode
+    /// stderr / stdout behavior is unchanged when `None`.
+    metrics_json: Option<PathBuf>,
+    /// Pre-computed sha256 of the raw prompt bytes. Populated iff
+    /// `metrics_json.is_some()` — avoids hashing on the no-metrics path.
+    prompt_sha256: Option<String>,
 }
 
 async fn run_session_core(run: SessionRun) -> anyhow::Result<SessionExit> {
@@ -399,6 +426,8 @@ async fn run_session_core(run: SessionRun) -> anyhow::Result<SessionExit> {
         auth,
         trust_cwd,
         base_url,
+        metrics_json,
+        prompt_sha256,
     } = run;
 
     let cwd = std::env::current_dir().context("cwd")?;
@@ -475,7 +504,10 @@ async fn run_session_core(run: SessionRun) -> anyhow::Result<SessionExit> {
     }
 
     let initial_len = initial.len();
-    let outcome = run_turn_with_outcome(
+    // PLAN §3.2 + `--metrics-json`: `wall_ms` is the monotonic delta around
+    // the turn loop only — not system time, not including setup/teardown.
+    let turn_started = std::time::Instant::now();
+    let outcome_res = run_turn_with_outcome(
         EngineInputs {
             provider,
             tools: tools.into_iter().map(|t: Arc<dyn Tool>| t).collect(),
@@ -488,12 +520,43 @@ async fn run_session_core(run: SessionRun) -> anyhow::Result<SessionExit> {
         },
         initial,
     )
-    .await
-    .context("run_turn")?;
+    .await;
+    let wall_ms = turn_started.elapsed().as_millis();
 
     // Tell the watcher to exit and wait so we don't leak a task.
     done.cancel();
     let _ = watcher.await;
+
+    // If the engine bubbled an error, still emit metrics (with exit=1 +
+    // zeroed token counters) before returning — benchmark harnesses rely on
+    // the file existing on every invocation.
+    let outcome = match outcome_res {
+        Ok(o) => o,
+        Err(e) => {
+            if let (Some(path), Some(hash)) = (metrics_json.as_ref(), prompt_sha256.as_ref()) {
+                let m = metrics::AskMetrics {
+                    schema_version: 1,
+                    tool: "harness",
+                    model: model.clone(),
+                    provider: metrics::provider_label(&model),
+                    wall_ms,
+                    api_ms: None,
+                    exit_code: 1,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_tokens: None,
+                    cache_creation_tokens: None,
+                    num_turns: 0,
+                    prompt_sha256: hash.clone(),
+                    session_id: session_id.to_string(),
+                };
+                if let Err(werr) = metrics::write_atomic(path, &m) {
+                    tracing::warn!(error = %werr, path = %path.display(), "write metrics failed");
+                }
+            }
+            return Err(e.context("run_turn"));
+        }
+    };
 
     let (final_msgs, session_exit, partial_assistant) = match outcome {
         TurnOutcome::Completed { messages } => (messages, SessionExit::Ok, None),
@@ -537,6 +600,36 @@ async fn run_session_core(run: SessionRun) -> anyhow::Result<SessionExit> {
     if let Err(e) = transaction.commit().await {
         tracing::warn!(error = %e, "tx commit failed; staging dir may linger");
     }
+
+    // Emit the run-metrics file if requested. Summarise usage across every
+    // assistant message produced this turn so the record is self-contained.
+    if let (Some(path), Some(hash)) = (metrics_json.as_ref(), prompt_sha256.as_ref()) {
+        let (input, output, cache_read, cache_create, num_turns) = metrics::summarize(&final_msgs);
+        let exit_code = match session_exit {
+            SessionExit::Ok => 0,
+            SessionExit::Cancelled => i32::from(EXIT_USER_INTERRUPT),
+        };
+        let m = metrics::AskMetrics {
+            schema_version: 1,
+            tool: "harness",
+            model: model.clone(),
+            provider: metrics::provider_label(&model),
+            wall_ms,
+            api_ms: None,
+            exit_code,
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: cache_read,
+            cache_creation_tokens: cache_create,
+            num_turns,
+            prompt_sha256: hash.clone(),
+            session_id: session_id.to_string(),
+        };
+        if let Err(e) = metrics::write_atomic(path, &m) {
+            tracing::warn!(error = %e, path = %path.display(), "write metrics failed");
+        }
+    }
+
     eprintln!("[session {session_id}]");
     Ok(session_exit)
 }
@@ -563,6 +656,10 @@ async fn run_session_tui(run: SessionRun) -> anyhow::Result<SessionExit> {
         auth,
         trust_cwd,
         base_url,
+        // TUI path does not emit the metrics JSON (iter-1 scope: only
+        // line-mode `ask` benchmarks). Silently drop.
+        metrics_json: _,
+        prompt_sha256: _,
     } = run;
 
     let cwd = std::env::current_dir().context("cwd")?;
@@ -946,6 +1043,9 @@ async fn cmd_session_resume(
         auth,
         trust_cwd,
         base_url,
+        // `session resume` does not take `--metrics-json` in iter 1.
+        metrics_json: None,
+        prompt_sha256: None,
     })
     .await
 }

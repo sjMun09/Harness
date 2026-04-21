@@ -27,7 +27,7 @@ bench/
 ├── prompts/             # 입력 프롬프트 픽스처 (재현성용)
 │   ├── cold_start.txt
 │   ├── glob_scan.txt
-│   ├── refactor.txt
+│   ├── signature_extract.txt
 │   └── grep_summary.txt
 └── results/             # 실행 로그 + 집계 CSV/MD 가 쌓이는 곳
     └── .gitkeep
