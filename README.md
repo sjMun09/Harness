@@ -227,7 +227,31 @@ export HARNESS_REFUSE_API_KEY=1
 
 ### OAuth 재사용 — TOS 주의
 
-harness 의 OAuth 모드는 Claude Code 의 keychain 토큰을 읽어 `/v1/messages` 에 직접 요청을 보냄 (`anthropic-beta: oauth-2025-04-20` + system prompt 선두에 Claude Code identity prefix 주입). 이건 Claude Code CLI 가 쓰는 것과 같은 와이어 프로토콜이지만, Anthropic 의 Max/Pro 이용약관은 공식적으로 "Claude.ai 웹 + 공식 Claude Code CLI 에서 사용" 으로 라이선스됨. 서드파티 클라이언트(harness 포함)로 이 토큰을 재사용하는 건 **명시적으로 허가된 패턴이 아님** — 현재까지 계정 차단 전례는 알려진 바 없으나, Anthropic 이 언제든 UA 바인딩이나 토큰 바인딩을 도입하면 막힐 수 있음. 중요/공개 코드베이스에서 장기적으로 쓰려면 공식 `claude` CLI 나 유료 API 키를 권장.
+harness 의 OAuth 모드는 Claude Code 의 keychain 토큰을 읽어 `/v1/messages` 에 직접 요청을 보냄 (`anthropic-beta: oauth-2025-04-20` + system prompt 선두에 Claude Code identity prefix 주입). 이건 Claude Code CLI 가 쓰는 것과 같은 와이어 프로토콜이지만, Anthropic 의 Max/Pro 이용약관은 공식적으로 "Claude.ai 웹 + 공식 Claude Code CLI 에서 사용" 으로 라이선스됨. 서드파티 클라이언트(harness 포함)로 이 토큰을 재사용하는 건 **명시적으로 허가된 패턴이 아님** — 2026-04 기준 Anthropic 이 **UA 기반으로 `harness` 류 서드파티 클라이언트를 rate-limit 0 에 가깝게 묶어놓은 상태**. 즉 OAuth 경로는 인증은 통과하지만 429 로 막힘. 로컬 LLM 이나 API 키 경로를 권장.
+
+### 로컬 LLM 으로 돌리기 (Ollama / vLLM / LM Studio / llama.cpp / MLX)
+
+harness 는 OpenAI 호환 엔드포인트를 `OPENAI_BASE_URL` 로 갈아끼울 수 있으므로, 대부분의 로컬 LLM 런타임이 그대로 드랍인 대체 가능. 모델 이름을 `openai/<id>` 로 주면 `is_openai_model` 이 라우팅을 OpenAI 프로바이더로 바꾸고, 실제 요청은 `{OPENAI_BASE_URL}/v1/chat/completions` 로 감.
+
+```bash
+export OPENAI_BASE_URL=http://localhost:11434/v1   # 예: Ollama
+export OPENAI_API_KEY=ollama                        # 아무 값이나 (빈 문자열만 거부)
+harness ask --model openai/qwen2.5-coder:14b "이 레포 설명해줘"
+```
+
+런타임별 세부 셋업 (포트·설치·툴콜 이슈·트러블슈팅) 은 `docs/local-llm/` 에 각각 정리되어 있음:
+
+| 런타임 | 플랫폼 | 기본 포트 | 문서 |
+|---|---|---|---|
+| Ollama | mac/linux/win | 11434 | [docs/local-llm/ollama.md](docs/local-llm/ollama.md) |
+| vLLM | linux+CUDA (주로) | 8000 | [docs/local-llm/vllm.md](docs/local-llm/vllm.md) |
+| LM Studio | mac/linux/win GUI | 1234 | [docs/local-llm/lm-studio.md](docs/local-llm/lm-studio.md) |
+| llama.cpp | 어디서나 (CPU/Metal/CUDA) | 8080 | [docs/local-llm/llama-cpp.md](docs/local-llm/llama-cpp.md) |
+| MLX | Apple Silicon 전용 | 8080 | [docs/local-llm/mlx.md](docs/local-llm/mlx.md) |
+
+오버뷰 + 런타임 선택 가이드는 [`docs/local-llm/README.md`](docs/local-llm/README.md).
+
+**툴콜 주의** — harness 의 에이전트 루프는 모델이 제대로 된 `tool_calls` JSON 을 내뱉어야 굴러가는데, 오픈소스 모델의 툴콜 품질은 모델 + 런타임 + chat template 조합에 따라 들쭉날쭉함. 복잡한 태스크 전에 반드시 `harness ask "list files in ."` 같은 간단한 쿼리로 툴 호출이 실제로 발생하는지 스모크 테스트할 것.
 
 ---
 
