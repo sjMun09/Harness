@@ -834,9 +834,15 @@ async fn run_session_tui(run: SessionRun) -> anyhow::Result<SessionExit> {
 /// - Anthropic: everything else (default).
 ///
 /// Auth precedence for Anthropic:
-///   `auto`   → `ANTHROPIC_API_KEY` if set, else Claude Code OAuth keychain.
+///   `auto`   → OAuth (Claude Code keychain) first; fall back to
+///              `ANTHROPIC_API_KEY` only if OAuth is unavailable.
 ///   `api-key`→ require `ANTHROPIC_API_KEY`.
 ///   `oauth`  → require a valid token in the macOS Claude Code keychain.
+///
+/// Billing lock: when `HARNESS_REFUSE_API_KEY=1` is set in the env,
+/// every metered path (Anthropic API key, OpenAI) fails fast with a
+/// clear error. OAuth is still permitted. Use this to guarantee a
+/// stray `ANTHROPIC_API_KEY` can never become the billing path.
 ///
 /// OpenAI: `OPENAI_API_KEY` only (OAuth not applicable). `--auth oauth` for
 /// an OpenAI model is rejected up-front.
@@ -845,7 +851,21 @@ fn build_provider(
     choice: AuthChoice,
     base_url: Option<&str>,
 ) -> anyhow::Result<Arc<dyn Provider>> {
+    // Hard lock: `HARNESS_REFUSE_API_KEY=1` bans any metered (paid-API)
+    // auth path — Anthropic API key, OpenAI, or custom base-url
+    // `OPENAI_BASE_URL` pointing at a hosted provider. Only OAuth
+    // (Claude Code subscription reuse) is allowed. Intended for users
+    // who want a hard guarantee that harness never spends credits on
+    // their behalf even if `ANTHROPIC_API_KEY` is lingering in the env.
+    let refuse_metered = env_has("HARNESS_REFUSE_API_KEY");
+
     if is_openai_model(model) {
+        if refuse_metered {
+            anyhow::bail!(
+                "HARNESS_REFUSE_API_KEY=1 is set — OpenAI models are metered and blocked. \
+                 Unset the lock or switch to an Anthropic model with --auth oauth."
+            );
+        }
         if matches!(choice, AuthChoice::Oauth) {
             anyhow::bail!("--auth oauth is not supported for OpenAI models; use --auth api-key");
         }
@@ -860,8 +880,16 @@ fn build_provider(
     }
 
     let mut p = match choice {
-        AuthChoice::ApiKey => AnthropicProvider::new(model.to_string())
-            .context("build Anthropic provider — is ANTHROPIC_API_KEY set?")?,
+        AuthChoice::ApiKey => {
+            if refuse_metered {
+                anyhow::bail!(
+                    "HARNESS_REFUSE_API_KEY=1 is set — explicit --auth api-key is blocked. \
+                     Unset the lock to permit metered API usage for this invocation."
+                );
+            }
+            AnthropicProvider::new(model.to_string())
+                .context("build Anthropic provider — is ANTHROPIC_API_KEY set?")?
+        }
         AuthChoice::Oauth => {
             let tok = load_oauth_token().context(
                 "load Claude Code OAuth token — run `claude` once to sign in, then retry",
@@ -871,20 +899,36 @@ fn build_provider(
                 .context("build Anthropic provider in OAuth mode")?
         }
         AuthChoice::Auto => {
-            if env_has("ANTHROPIC_API_KEY") {
-                eprintln!("[auth] api-key (ANTHROPIC_API_KEY)");
-                AnthropicProvider::new(model.to_string())
-                    .context("build Anthropic provider from ANTHROPIC_API_KEY")?
-            } else {
-                match load_oauth_token() {
-                    Ok(tok) => {
-                        eprintln!("[auth] oauth (Claude Code subscription)");
-                        AnthropicProvider::with_oauth(model.to_string(), tok.access_token)
-                            .context("build Anthropic provider in OAuth mode")?
+            // Prefer OAuth (subscription, zero marginal cost) over the
+            // metered API key, even when ANTHROPIC_API_KEY is present —
+            // an API key lingering in the shell env should NOT silently
+            // become the billing path. Fall back to the API key only if
+            // OAuth is unavailable AND the hard lock isn't set.
+            match load_oauth_token() {
+                Ok(tok) => {
+                    eprintln!("[auth] oauth (Claude Code subscription)");
+                    AnthropicProvider::with_oauth(model.to_string(), tok.access_token)
+                        .context("build Anthropic provider in OAuth mode")?
+                }
+                Err(oauth_err) => {
+                    if refuse_metered {
+                        anyhow::bail!(
+                            "OAuth unavailable ({oauth_err}) and HARNESS_REFUSE_API_KEY=1 \
+                             blocks API-key fallback. Sign in via `claude` or unset the lock."
+                        );
                     }
-                    Err(e) => anyhow::bail!(
-                        "no credential available — set ANTHROPIC_API_KEY or sign in via `claude`: {e}"
-                    ),
+                    if env_has("ANTHROPIC_API_KEY") {
+                        eprintln!(
+                            "[auth] api-key (ANTHROPIC_API_KEY) — OAuth unavailable: {oauth_err}"
+                        );
+                        AnthropicProvider::new(model.to_string())
+                            .context("build Anthropic provider from ANTHROPIC_API_KEY")?
+                    } else {
+                        anyhow::bail!(
+                            "no credential available — sign in via `claude` or set \
+                             ANTHROPIC_API_KEY: {oauth_err}"
+                        );
+                    }
                 }
             }
         }
