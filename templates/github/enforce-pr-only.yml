@@ -56,15 +56,34 @@ jobs:
           branch="${{ github.ref_name }}"
           actor="${{ github.actor }}"
 
-          pr_count=$(gh api "repos/${{ github.repository }}/commits/$sha/pulls" \
-            --jq "[.[] | select(.merged_at != null and .base.ref == \"$branch\")] | length")
+          # GitHub's `/commits/{sha}/pulls` endpoint is eventually-consistent:
+          # the workflow can fire 5-15s after a merge, before the merge→PR
+          # association is indexed, producing false-positive alarms. Retry
+          # with backoff (total ~100s) before concluding it's a real direct
+          # push. If it's a true direct push, there was never a PR and no
+          # amount of waiting will make one appear — the only cost is a
+          # 100s delay on the alarm, which is fine for an alarm-only layer.
+          pr_count=0
+          for attempt in 1 2 3 4 5; do
+            pr_count=$(gh api "repos/${{ github.repository }}/commits/$sha/pulls" \
+              --jq "[.[] | select(.merged_at != null and .base.ref == \"$branch\")] | length")
+            if [ "$pr_count" != "0" ]; then
+              echo "ok — sha $sha landed via merged PR (attempt $attempt)."
+              exit 0
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              delay=$((attempt * 10))
+              echo "attempt $attempt: no merged PR associated yet, retrying in ${delay}s (GitHub API indexing lag)..."
+              sleep "$delay"
+            fi
+          done
 
-          if [ "$pr_count" = "0" ]; then
-            echo "::error title=Policy violation::Direct push to '$branch' by $actor (sha=$sha) — no merged PR associated."
+          # All 5 attempts exhausted — treat as a real policy violation.
+          echo "::error title=Policy violation::Direct push to '$branch' by $actor (sha=$sha) — no merged PR associated after 5 retries."
 
-            gh issue create \
-              --title "Policy violation: direct push to $branch" \
-              --body "**Actor**: $actor
+          gh issue create \
+            --title "Policy violation: direct push to $branch" \
+            --body "**Actor**: $actor
           **Branch**: $branch
           **SHA**: $sha
           **Run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -72,9 +91,6 @@ jobs:
           This commit landed on a protected branch without a merged pull request. Policy requires all changes to protected branches to go through PR + review.
 
           If this was intentional (emergency hotfix, force-push recovery, etc.), close this issue with a short explanation. Otherwise consider reverting via \`gh pr create\` and merging the revert through the normal flow." \
-              || echo "::warning::could not open issue (token scope?)"
+            || echo "::warning::could not open issue (token scope?)"
 
-            exit 1
-          fi
-
-          echo "ok — sha $sha landed via merged PR."
+          exit 1
