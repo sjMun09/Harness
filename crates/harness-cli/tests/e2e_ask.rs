@@ -345,6 +345,124 @@ fn ask_empty_stdin_errors_out() {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Test — `--metrics-json PATH` writes a strict 14-field run-metrics record
+// with correct types after the turn loop finishes.
+// (13 schema fields + ensure `wall_ms` is non-negative and `input_tokens`
+// reflects the fake server's `usage.input_tokens`.)
+// ────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ask_writes_metrics_json_on_success() {
+    let tmp = TempDir::new().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let (server, addr) =
+        rt.block_on(async { FakeServer::start(vec![Script::text_only("metrics ok")]).await });
+
+    let metrics_path = tmp.path().join("metrics.json");
+    let url = format!("http://{addr}");
+    let mut cmd = harness_cmd(&tmp, &url);
+    cmd.arg("ask")
+        .arg("--metrics-json")
+        .arg(&metrics_path)
+        .arg("hi");
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = cmd.spawn().expect("spawn harness");
+    let guard = ChildGuard::new(child);
+    let output = wait_with_timeout(guard.take());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "exit={:?} stdout={stdout} stderr={stderr}",
+        output.status
+    );
+
+    // The metrics file must exist (atomic rename happened) and the `.tmp`
+    // sibling must NOT — write_atomic cleaned up.
+    assert!(
+        metrics_path.exists(),
+        "metrics.json missing at {}",
+        metrics_path.display()
+    );
+    assert!(
+        !tmp.path().join("metrics.json.tmp").exists(),
+        "leftover .tmp file after atomic rename"
+    );
+
+    let body = std::fs::read_to_string(&metrics_path).expect("read metrics.json");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("parse metrics.json");
+
+    // All 13 schema fields present with correct types. `cache_*` may be
+    // either integer or null per spec.
+    assert_eq!(v["schema_version"], 1, "schema_version");
+    assert_eq!(v["tool"], "harness", "tool");
+    assert!(v["model"].is_string(), "model not string: {:?}", v["model"]);
+    assert_eq!(v["provider"], "anthropic", "provider");
+    assert!(
+        v["wall_ms"].is_number(),
+        "wall_ms not number: {:?}",
+        v["wall_ms"]
+    );
+    assert!(
+        v["api_ms"].is_null() || v["api_ms"].is_number(),
+        "api_ms bad type: {:?}",
+        v["api_ms"]
+    );
+    assert_eq!(v["exit_code"], 0, "exit_code");
+    assert!(
+        v["input_tokens"].is_number(),
+        "input_tokens not number: {:?}",
+        v["input_tokens"]
+    );
+    assert!(
+        v["output_tokens"].is_number(),
+        "output_tokens not number: {:?}",
+        v["output_tokens"]
+    );
+    let cr = &v["cache_read_tokens"];
+    assert!(
+        cr.is_null() || cr.is_number(),
+        "cache_read_tokens bad type: {cr:?}"
+    );
+    let cc = &v["cache_creation_tokens"];
+    assert!(
+        cc.is_null() || cc.is_number(),
+        "cache_creation_tokens bad type: {cc:?}"
+    );
+    assert!(
+        v["num_turns"].is_number(),
+        "num_turns not number: {:?}",
+        v["num_turns"]
+    );
+    // prompt_sha256("hi") per the stdlib sha256 vector.
+    assert_eq!(
+        v["prompt_sha256"],
+        "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4",
+        "prompt_sha256 mismatch"
+    );
+    assert!(
+        v["session_id"].is_string(),
+        "session_id not string: {:?}",
+        v["session_id"]
+    );
+
+    // Fake server reports usage {input_tokens:1} on message_start and
+    // {output_tokens:5} on message_delta → exactly one assistant turn.
+    assert_eq!(v["input_tokens"].as_u64(), Some(1), "input_tokens value");
+    assert_eq!(v["output_tokens"].as_u64(), Some(5), "output_tokens value");
+    assert_eq!(v["num_turns"].as_u64(), Some(1), "num_turns value");
+
+    rt.block_on(server.shutdown());
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Test 3 — SIGINT on the child yields exit code 130. Unix-only because
 // `nix::sys::signal::kill` does not apply on Windows.
 // ────────────────────────────────────────────────────────────────────────────
