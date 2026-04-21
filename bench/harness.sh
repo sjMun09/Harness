@@ -1,51 +1,68 @@
 #!/usr/bin/env bash
-# Harness 단일 실행 + 측정.
-# 사용: ./harness.sh <prompt_file> <stdout_file> <stderr_file> <metrics_file>
+# Harness 단일 실행 + 메트릭 수집.
+# 사용: ./harness.sh <prompt_file> <stdout_file> <stderr_file> <metrics_file> [model]
 #
-# 출력 파일에 stdout/stderr 를 그대로 남기고, metrics_file 에는 key=value
-# 라인으로 wall_ms/exit_code/assistant_bytes/stderr_lines 를 기록한다.
-# 토큰 값은 Harness stderr 의 `[usage]` 라인에서 파싱 시도 (실패 시 빈 값).
+# harness 바이너리 자체가 `--metrics-json <path>` 플래그로 구조화 메트릭을
+# 원자적으로 기록한다. 이 스크립트는 그 플래그를 넘겨 harness 를 호출하고,
+# 종료 코드와 메트릭 파일 존재만 확인한다. date/gdate 나 stderr grep 같은
+# 추정치는 사용하지 않는다.
+#
+# harness 가 비정상 종료했거나 메트릭 파일을 남기지 못한 경우에만,
+# run.sh 가 행(row)을 만들 수 있도록 fallback JSON 을 이 스크립트가 대신 쓴다.
+# fallback JSON 에서 실제로 계산하는 필드는 prompt_sha256 하나뿐이다.
 
-set -u
+set -euo pipefail
 
 prompt_file=${1:?prompt_file required}
 stdout_file=${2:?stdout_file required}
 stderr_file=${3:?stderr_file required}
 metrics_file=${4:?metrics_file required}
+model=${5:-claude-opus-4-7}
 
 command -v harness >/dev/null 2>&1 || { echo "harness not in PATH" >&2; exit 127; }
-
-# macOS 는 gdate, Linux 는 date
-if command -v gdate >/dev/null 2>&1; then
-  now_ms() { gdate +%s%3N; }
-else
-  now_ms() { date +%s%3N; }
-fi
+command -v shasum  >/dev/null 2>&1 || { echo "bench requires shasum" >&2; exit 127; }
 
 prompt=$(cat "$prompt_file")
+prompt_sha256=$(shasum -a 256 "$prompt_file" | awk '{print $1}')
 
-start=$(now_ms)
-harness ask "$prompt" >"$stdout_file" 2>"$stderr_file"
+# bench 는 비대화형 실행이므로 --trust-cwd 와 --dangerously-skip-permissions 는 필수다.
+# 메트릭은 harness 자체가 --metrics-json 경로에 원자적으로 기록한다.
+set +e
+harness --model "$model" ask \
+  --metrics-json "$metrics_file" \
+  --trust-cwd \
+  --dangerously-skip-permissions \
+  "$prompt" \
+  >"$stdout_file" 2>"$stderr_file"
 exit_code=$?
-end=$(now_ms)
-wall_ms=$((end - start))
+set -e
 
-assistant_bytes=$(wc -c <"$stdout_file" | tr -d ' ')
-stderr_lines=$(LC_ALL=en_US.UTF-8 grep -c '^⏺ ' "$stderr_file" 2>/dev/null || echo 0)
-
-tokens_in=""
-tokens_out=""
-if grep -q '\[usage\]' "$stderr_file"; then
-  tokens_in=$(grep '\[usage\]' "$stderr_file" | tail -1 | sed -nE 's/.*in=([0-9]+).*/\1/p')
-  tokens_out=$(grep '\[usage\]' "$stderr_file" | tail -1 | sed -nE 's/.*out=([0-9]+).*/\1/p')
+# 정상 종료이고 메트릭 파일이 남아 있으면 harness 가 쓴 값을 그대로 신뢰한다.
+if [[ "$exit_code" -eq 0 && -s "$metrics_file" ]]; then
+  exit 0
 fi
 
+# 실패 경로: harness 가 메트릭 파일을 쓰지 못했거나 비어 있다.
+# run.sh 가 집계할 수 있도록 스키마에 맞는 fallback JSON 을 남긴다.
+tmp="${metrics_file}.tmp"
+cat >"$tmp" <<EOF
 {
-  echo "tool=harness"
-  echo "wall_ms=$wall_ms"
-  echo "exit_code=$exit_code"
-  echo "assistant_bytes=$assistant_bytes"
-  echo "stderr_lines=$stderr_lines"
-  echo "tokens_in=$tokens_in"
-  echo "tokens_out=$tokens_out"
-} >"$metrics_file"
+  "schema_version": 1,
+  "tool": "harness",
+  "model": "$model",
+  "provider": null,
+  "wall_ms": null,
+  "api_ms": null,
+  "exit_code": $exit_code,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cache_read_tokens": null,
+  "cache_creation_tokens": null,
+  "num_turns": null,
+  "prompt_sha256": "$prompt_sha256",
+  "session_id": null
+}
+EOF
+mv "$tmp" "$metrics_file"
+
+exit "$exit_code"

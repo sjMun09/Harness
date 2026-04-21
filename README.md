@@ -181,19 +181,20 @@ Harness 는 Claude Code 를 대체하려는 게 아니라 **특정 사용 결을
 | **언어 · 런타임** | Node 18+ | Rust 1.82+ (외부 런타임 불필요) |
 | **라이선스** | 비공개 | MIT OR Apache-2.0 (`Cargo.toml:9`) |
 
-### 실측 성능 (자리 표시)
+### 실측 성능
 
-> **Note.** 아래 표의 숫자는 실제 벤치를 돌려 채운 값이 아니라 **템플릿**이다. `bench/` 하니스를 사용해 본인의 머신·API 키·네트워크에서 재현한 뒤, 해당 결과를 이 표에 커밋하는 식으로 쓰면 된다. 날조된 숫자는 의도적으로 적지 않는다.
+> **Disclaimer.**
+> - 실측 숫자는 `bench/run.sh` 를 직접 돌려 채운다. 돌리지 않은 셀은 TBD 그대로 둔다. 날조 금지.
+> - 측정 불가해서 삭제된 지표 (이유): glob 1k 스캔 (LLM 추론과 분리 불가), 10-파일 리팩토링 (fixture 레포 + 테스트 oracle 필요), 100-턴 실패율 (n>=100 필요, 실패 정의 부재).
+> - n<10 은 지연 주장에 통계적으로 부적합. `run.sh` 기본값 n=20.
 
 | 지표 | Claude Code | Harness | 비고 |
 |---|---|---|---|
-| 콜드 스타트 → 첫 토큰 (ms) | TBD | TBD | `harness ask "hi"` vs `claude "hi"` |
-| `glob **/*.rs` 1k 파일 스캔 (ms) | TBD | TBD | 단일 tool-call 지연 |
-| 10-파일 리팩토링 턴 완주(초) | TBD | TBD | `bench/prompts/refactor.md` |
-| 토큰 사용량(input + output) | TBD | TBD | provider usage 로그 |
-| 100 턴당 실패율(타임아웃/파싱 오류) | TBD | TBD | 재현 가능한 오류만 집계 |
+| wall_ms (cold_start.txt 프롬프트, n=20 median) | TBD | TBD | 셸이 아니라 각 CLI 가 자체 보고한 값. Claude: `.duration_ms`. Harness: Rust `Instant::now` delta |
+| 토큰 (input + output, cold_start.txt) | TBD | TBD | Claude: `.usage.*`. Harness: `--metrics-json` |
+| 멀티모델 플래그 (Claude Code 의 Haiku 서브 호출 여부) | TBD | — | 정직한 비교의 주의: Claude Code 는 Opus 프롬프트 안에서 Haiku 서브에이전트를 섞어 씀 (`.modelUsage` 로 확인 가능) |
 
-벤치 수행 방법 및 결과 집계 형식은 [`bench/README.md`](bench/README.md) 를 참고. 실제 수치를 넣으면 바로 이 표 자리로 옮기면 된다.
+벤치 수행 방법 및 결과 집계 형식은 [`bench/README.md`](bench/README.md) 를 참고.
 
 ---
 
