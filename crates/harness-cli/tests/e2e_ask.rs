@@ -443,8 +443,7 @@ fn ask_writes_metrics_json_on_success() {
     );
     // prompt_sha256("hi") per the stdlib sha256 vector.
     assert_eq!(
-        v["prompt_sha256"],
-        "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4",
+        v["prompt_sha256"], "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4",
         "prompt_sha256 mismatch"
     );
     assert!(

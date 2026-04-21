@@ -348,7 +348,9 @@ async fn cmd_ask(
     // Hash the raw prompt bytes up-front — the prompt is consumed when we
     // build the initial user Message. Captured here so the metrics path
     // can emit it regardless of whether the turn loop succeeds or fails.
-    let prompt_hash = metrics_json.as_ref().map(|_| metrics::prompt_sha256(&prompt));
+    let prompt_hash = metrics_json
+        .as_ref()
+        .map(|_| metrics::prompt_sha256(&prompt));
 
     let run = SessionRun {
         settings,

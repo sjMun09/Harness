@@ -54,12 +54,10 @@ pub fn summarize(messages: &[Message]) -> (u64, u64, Option<u64>, Option<u64>, u
         // num_turns = assistant messages that ran a turn (tool-call or final).
         // An assistant message with zero content blocks is a stub and does
         // not count.
-        let has_tool_or_text = m.content.iter().any(|b| {
-            matches!(
-                b,
-                ContentBlock::Text { .. } | ContentBlock::ToolUse { .. }
-            )
-        });
+        let has_tool_or_text = m
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { .. } | ContentBlock::ToolUse { .. }));
         if has_tool_or_text {
             num_turns = num_turns.saturating_add(1);
         }
