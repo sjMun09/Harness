@@ -201,6 +201,34 @@ cargo install --path crates/harness-cli
 
 `ANTHROPIC_API_KEY` 없어도 `claude` 로 로그인돼 있으면 harness 가 macOS 키체인(`com.anthropic.claude-code.*`) 의 OAuth 토큰을 자동으로 씀. 즉 Max 구독자는 별도 키 불필요. 강제 선택은 `--auth oauth` / `--auth api-key`.
 
+**우선순위 (기본 `auto` 모드)** — OAuth 우선, API 키는 폴백. `ANTHROPIC_API_KEY` 가 쉘 env 에 남아있어도 OAuth 가 정상이면 그쪽으로 가고 과금 API 는 타지 않음.
+
+```bash
+# 1) OAuth 키체인에서 토큰 로드 시도 → 성공 시 이걸로 감 (과금 X)
+# 2) 실패 & ANTHROPIC_API_KEY 있음 → API 키 폴백 (과금 O)
+# 3) 실패 & API 키도 없음 → 에러
+```
+
+### 과금 차단 락 — `HARNESS_REFUSE_API_KEY=1`
+
+"절대 과금 안 됨" 을 보장하고 싶으면 쉘 설정에 아래를 추가:
+
+```bash
+export HARNESS_REFUSE_API_KEY=1
+```
+
+이 락이 걸려 있으면:
+- `--auth api-key` 명시해도 거부 (clear 에러로 빠짐).
+- `auto` 모드에서 OAuth 실패해도 API 키 폴백 안 함.
+- OpenAI 모델 (`gpt-*`/`o1`/`o3`/`openai/...`) 도 거부 — 이쪽도 과금 경로라.
+- OAuth 만 허용. Max/Pro 구독 범위 안에서만 동작.
+
+해제하려면 해당 한 번만: `HARNESS_REFUSE_API_KEY= harness ask "..."` 또는 쉘 rc 에서 제거.
+
+### OAuth 재사용 — TOS 주의
+
+harness 의 OAuth 모드는 Claude Code 의 keychain 토큰을 읽어 `/v1/messages` 에 직접 요청을 보냄 (`anthropic-beta: oauth-2025-04-20` + system prompt 선두에 Claude Code identity prefix 주입). 이건 Claude Code CLI 가 쓰는 것과 같은 와이어 프로토콜이지만, Anthropic 의 Max/Pro 이용약관은 공식적으로 "Claude.ai 웹 + 공식 Claude Code CLI 에서 사용" 으로 라이선스됨. 서드파티 클라이언트(harness 포함)로 이 토큰을 재사용하는 건 **명시적으로 허가된 패턴이 아님** — 현재까지 계정 차단 전례는 알려진 바 없으나, Anthropic 이 언제든 UA 바인딩이나 토큰 바인딩을 도입하면 막힐 수 있음. 중요/공개 코드베이스에서 장기적으로 쓰려면 공식 `claude` CLI 나 유료 API 키를 권장.
+
 ---
 
 ## Claude Code 와의 비교

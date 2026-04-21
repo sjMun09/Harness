@@ -30,6 +30,11 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Beta flag required when authenticating via a Claude Code OAuth token.
+/// Without this header the Messages API rejects OAuth calls with
+/// `authentication_error: OAuth authentication is currently not supported`.
+const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
+
 /// Default per-request output cap. Anthropic Messages API requires `max_tokens`.
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
@@ -154,7 +159,8 @@ impl AnthropicProvider {
 impl Provider for AnthropicProvider {
     async fn stream(&self, req: StreamRequest<'_>) -> Result<EventStream, ProviderError> {
         let url = self.messages_url()?;
-        let body = build_request_body(&self.model, &req, self.prompt_caching);
+        let oauth_mode = matches!(self.auth, AuthMode::OAuth(_));
+        let body = build_request_body(&self.model, &req, self.prompt_caching, oauth_mode);
 
         let mut builder = self
             .client
@@ -164,7 +170,9 @@ impl Provider for AnthropicProvider {
             .header("anthropic-version", ANTHROPIC_VERSION);
         builder = match &self.auth {
             AuthMode::ApiKey(k) => builder.header("x-api-key", k.expose_secret()),
-            AuthMode::OAuth(k) => builder.bearer_auth(k.expose_secret()),
+            AuthMode::OAuth(k) => builder
+                .header("anthropic-beta", OAUTH_BETA_HEADER)
+                .bearer_auth(k.expose_secret()),
         };
 
         let resp = builder
@@ -222,6 +230,7 @@ fn build_request_body(
     model: &str,
     req: &StreamRequest<'_>,
     prompt_caching: bool,
+    oauth_mode: bool,
 ) -> serde_json::Value {
     let max_tokens = if req.max_tokens == 0 {
         DEFAULT_MAX_TOKENS
@@ -229,7 +238,7 @@ fn build_request_body(
         req.max_tokens
     };
 
-    let system = build_system_blocks(req.system, prompt_caching);
+    let system = build_system_blocks(req.system, prompt_caching, oauth_mode);
     let tools = build_tools_array(req.tools, prompt_caching);
     let messages = serde_json::to_value(req.messages).unwrap_or_else(|_| Value::Array(Vec::new()));
 
@@ -252,14 +261,31 @@ fn build_request_body(
 
 /// Render the `system` field as Anthropic's structured form
 /// (`[{"type":"text","text":"...","cache_control":{...}}]`). Returns an
-/// empty Vec when the prompt is empty so the caller can omit the field.
-fn build_system_blocks(system: &str, prompt_caching: bool) -> Vec<Value> {
-    if system.is_empty() {
+/// empty Vec when the prompt is empty AND we're not in OAuth mode so
+/// the caller can omit the field.
+///
+/// In OAuth mode the API requires the system text to start with
+/// `CLAUDE_CODE_SYSTEM_PREFIX`; this function prepends it (or emits
+/// the prefix alone if the caller's system is empty). Requests that
+/// already start with the prefix are passed through unchanged.
+fn build_system_blocks(system: &str, prompt_caching: bool, oauth_mode: bool) -> Vec<Value> {
+    let effective = if oauth_mode {
+        if system.is_empty() {
+            crate::oauth::CLAUDE_CODE_SYSTEM_PREFIX.to_string()
+        } else if system.starts_with(crate::oauth::CLAUDE_CODE_SYSTEM_PREFIX) {
+            system.to_string()
+        } else {
+            format!("{}\n\n{}", crate::oauth::CLAUDE_CODE_SYSTEM_PREFIX, system)
+        }
+    } else if system.is_empty() {
         return Vec::new();
-    }
+    } else {
+        system.to_string()
+    };
+
     let mut block = json!({
         "type": "text",
-        "text": system,
+        "text": effective,
     });
     if prompt_caching {
         block
@@ -336,7 +362,7 @@ mod tests {
         let tools: Vec<ToolSpec> = Vec::new();
         let req = make_req("you are helpful", &msgs, &tools);
 
-        let body = build_request_body("claude-opus-4-7", &req, true);
+        let body = build_request_body("claude-opus-4-7", &req, true, false);
 
         let sys = body
             .get("system")
@@ -355,7 +381,7 @@ mod tests {
         let tools = vec![tool("Read"), tool("Write"), tool("Edit")];
         let req = make_req("sys", &msgs, &tools);
 
-        let body = build_request_body("claude-opus-4-7", &req, true);
+        let body = build_request_body("claude-opus-4-7", &req, true, false);
 
         let arr = body
             .get("tools")
@@ -378,7 +404,7 @@ mod tests {
         let tools = vec![tool("Read"), tool("Write")];
         let req = make_req("sys", &msgs, &tools);
 
-        let body = build_request_body("claude-opus-4-7", &req, false);
+        let body = build_request_body("claude-opus-4-7", &req, false, false);
 
         let sys = body.get("system").and_then(Value::as_array).unwrap();
         assert!(sys.last().unwrap().get("cache_control").is_none());
@@ -392,7 +418,7 @@ mod tests {
         let tools: Vec<ToolSpec> = Vec::new();
         let req = make_req("", &msgs, &tools);
 
-        let body = build_request_body("claude-opus-4-7", &req, true);
+        let body = build_request_body("claude-opus-4-7", &req, true, false);
         assert!(body.get("system").is_none());
     }
 
@@ -402,10 +428,98 @@ mod tests {
         let tools: Vec<ToolSpec> = Vec::new();
         let req = make_req("sys", &msgs, &tools);
 
-        let body = build_request_body("claude-opus-4-7", &req, true);
+        let body = build_request_body("claude-opus-4-7", &req, true, false);
         assert_eq!(body.get("model"), Some(&Value::from("claude-opus-4-7")));
         assert_eq!(body.get("stream"), Some(&Value::Bool(true)));
         assert_eq!(body.get("max_tokens"), Some(&Value::from(1024)));
+    }
+
+    #[test]
+    fn body_prepends_claude_code_prefix_in_oauth_mode() {
+        let msgs = vec![Message::user("hi")];
+        let tools: Vec<ToolSpec> = Vec::new();
+        let req = make_req("you are harness", &msgs, &tools);
+
+        let body = build_request_body("claude-opus-4-7", &req, false, true);
+
+        let sys = body
+            .get("system")
+            .and_then(Value::as_array)
+            .expect("system array");
+        assert_eq!(sys.len(), 1);
+        let text = sys[0].get("text").and_then(Value::as_str).unwrap();
+        assert!(
+            text.starts_with(crate::oauth::CLAUDE_CODE_SYSTEM_PREFIX),
+            "oauth mode must start system with Claude Code prefix, got: {text:?}"
+        );
+        assert!(
+            text.contains("you are harness"),
+            "user system content must still be present after prefix"
+        );
+    }
+
+    #[test]
+    fn body_emits_prefix_alone_when_system_empty_in_oauth_mode() {
+        let msgs = vec![Message::user("hi")];
+        let tools: Vec<ToolSpec> = Vec::new();
+        let req = make_req("", &msgs, &tools);
+
+        let body = build_request_body("claude-opus-4-7", &req, false, true);
+
+        let sys = body
+            .get("system")
+            .and_then(Value::as_array)
+            .expect("system array");
+        assert_eq!(sys.len(), 1);
+        assert_eq!(
+            sys[0].get("text").and_then(Value::as_str),
+            Some(crate::oauth::CLAUDE_CODE_SYSTEM_PREFIX)
+        );
+    }
+
+    #[test]
+    fn body_does_not_duplicate_prefix_when_already_present() {
+        let msgs = vec![Message::user("hi")];
+        let tools: Vec<ToolSpec> = Vec::new();
+        let combined = format!(
+            "{}\n\nextra context",
+            crate::oauth::CLAUDE_CODE_SYSTEM_PREFIX
+        );
+        let req = make_req(&combined, &msgs, &tools);
+
+        let body = build_request_body("claude-opus-4-7", &req, false, true);
+
+        let text = body
+            .get("system")
+            .and_then(Value::as_array)
+            .and_then(|a| a[0].get("text"))
+            .and_then(Value::as_str)
+            .unwrap();
+        // The prefix should appear exactly once.
+        let occurrences = text
+            .matches(crate::oauth::CLAUDE_CODE_SYSTEM_PREFIX)
+            .count();
+        assert_eq!(occurrences, 1, "prefix duplicated: {text:?}");
+    }
+
+    #[test]
+    fn body_omits_prefix_in_api_key_mode() {
+        let msgs = vec![Message::user("hi")];
+        let tools: Vec<ToolSpec> = Vec::new();
+        let req = make_req("you are harness", &msgs, &tools);
+
+        let body = build_request_body("claude-opus-4-7", &req, false, false);
+
+        let text = body
+            .get("system")
+            .and_then(Value::as_array)
+            .and_then(|a| a[0].get("text"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(
+            !text.contains(crate::oauth::CLAUDE_CODE_SYSTEM_PREFIX),
+            "api-key mode must NOT inject the Claude Code prefix, got: {text:?}"
+        );
     }
 
     #[test]
