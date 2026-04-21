@@ -18,6 +18,19 @@
 # (Pro / Team / Enterprise — minutes are included or generous), or you
 # simply want the alarm on private repos too, delete the `if:` line below.
 #
+# Detection strategy (hybrid, ordered cheapest → most expensive):
+#   1. Fast-path: inspect the head commit message. GitHub's default
+#      `--merge` strategy produces `Merge pull request #N from ...`.
+#      This instant check handles ~95% of legitimate merges without any
+#      API call — and, crucially, works even during GitHub-wide indexing
+#      incidents when `/commits/{sha}/pulls` is running hours behind.
+#   2. Slow-path: retry `/commits/{sha}/pulls` with backoff up to ~6 min
+#      to absorb the API's eventual-consistency lag (normally 5-15 s,
+#      minutes during incidents). Transient API failures are treated as
+#      "retry" not "alarm", so one flaky call can't burn the whole budget.
+#   3. Dedupe: before opening an issue, check whether one is already open
+#      for the same SHA, so a re-run doesn't multiply noise.
+#
 # Drop this file at `.github/workflows/enforce-pr-only.yml` in any repo
 # you want gated.
 #
@@ -42,6 +55,7 @@ jobs:
     # workflow is a no-op against private-Free billing.
     if: ${{ github.event.repository.private == false }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,30 +70,79 @@ jobs:
           branch="${{ github.ref_name }}"
           actor="${{ github.actor }}"
 
-          # GitHub's `/commits/{sha}/pulls` endpoint is eventually-consistent:
-          # the workflow can fire 5-15s after a merge, before the merge→PR
-          # association is indexed, producing false-positive alarms. Retry
-          # with backoff (total ~100s) before concluding it's a real direct
-          # push. If it's a true direct push, there was never a PR and no
-          # amount of waiting will make one appear — the only cost is a
-          # 100s delay on the alarm, which is fine for an alarm-only layer.
-          pr_count=0
-          for attempt in 1 2 3 4 5; do
+          # Guard: branch-delete / force-delete / empty push payloads ship
+          # a zero-SHA as `after`. There's no commit to check; exit clean.
+          if [ -z "$sha" ] || [ "$sha" = "0000000000000000000000000000000000000000" ]; then
+            echo "skip: zero/empty after-SHA (branch delete or empty push)."
+            exit 0
+          fi
+
+          # ---- Fast-path: commit message heuristic ---------------------
+          # GitHub's default `--merge` strategy produces a merge commit
+          # titled "Merge pull request #N from <branch>". Catching this
+          # string short-circuits the whole API dance for ~95% of real
+          # merges and makes us resilient to GitHub API incidents.
+          # Squash-merge and rebase-merge don't produce this prefix, so
+          # they fall through to the API path (which handles them fine).
+          msg=$(git log -1 --format=%s "$sha" 2>/dev/null || echo "")
+          if printf '%s' "$msg" | grep -qE '^Merge pull request #[0-9]+'; then
+            echo "ok — sha $sha is a merge-commit for a PR (fast-path, no API call)."
+            exit 0
+          fi
+
+          # ---- Slow-path: /commits/{sha}/pulls with retry --------------
+          # The endpoint is eventually-consistent. Normal indexing lag is
+          # 5-15 s; GitHub-wide incidents have produced multi-minute lag
+          # (community reports in the single-digit minutes, occasional
+          # 2h+ outliers). An alarm-only layer can afford to wait several
+          # minutes before crying wolf — the only cost of a longer ceiling
+          # is a delayed alarm on genuine violations, which is fine.
+          #
+          # Budget: 10 + 20 + 30 + 60*5 = 360 s (~6 min) across 8 tries.
+          #
+          # Transient-failure tolerance: if `gh api` errors (rate limit,
+          # 5xx, auth blip), we capture the failure as `ERR`, treat it as
+          # "keep retrying", and never let `set -e` kill the whole step
+          # on a single flaky call.
+          for attempt in 1 2 3 4 5 6 7 8; do
             pr_count=$(gh api "repos/${{ github.repository }}/commits/$sha/pulls" \
-              --jq "[.[] | select(.merged_at != null and .base.ref == \"$branch\")] | length")
-            if [ "$pr_count" != "0" ]; then
-              echo "ok — sha $sha landed via merged PR (attempt $attempt)."
+              --jq "[.[] | select(.merged_at != null and .base.ref == \"$branch\")] | length" \
+              2>/dev/null || echo ERR)
+
+            # Accept only a positive integer as "merged PR exists".
+            # Reject ERR, empty string, "0", "null", and any non-numeric
+            # garbage (belt-and-braces against future jq / API changes).
+            if [ "$pr_count" != "ERR" ] && [ "$pr_count" -gt 0 ] 2>/dev/null; then
+              echo "ok — sha $sha landed via merged PR (slow-path, attempt $attempt)."
               exit 0
             fi
-            if [ "$attempt" -lt 5 ]; then
-              delay=$((attempt * 10))
-              echo "attempt $attempt: no merged PR associated yet, retrying in ${delay}s (GitHub API indexing lag)..."
+
+            if [ "$attempt" -lt 8 ]; then
+              case "$attempt" in
+                1) delay=10 ;;
+                2) delay=20 ;;
+                3) delay=30 ;;
+                *) delay=60 ;;
+              esac
+              echo "attempt $attempt: no merged PR yet (pr_count=$pr_count), retrying in ${delay}s..."
               sleep "$delay"
             fi
           done
 
-          # All 5 attempts exhausted — treat as a real policy violation.
-          echo "::error title=Policy violation::Direct push to '$branch' by $actor (sha=$sha) — no merged PR associated after 5 retries."
+          # ---- Alarm path ---------------------------------------------
+          # 8 attempts / ~6 min exhausted. Treat as a real violation.
+          # Before opening an issue, dedupe on the SHA: a re-run of the
+          # workflow for the same SHA (UI "Re-run all jobs" after indexing
+          # catches up, double-firing, etc.) shouldn't produce duplicate
+          # issues.
+          existing=$(gh issue list --state open --search "$sha in:body" \
+            --json number -q '.[0].number' 2>/dev/null || true)
+          if [ -n "$existing" ]; then
+            echo "::warning::issue #$existing already open for $sha — not duplicating."
+            exit 1
+          fi
+
+          echo "::error title=Policy violation::Direct push to '$branch' by $actor (sha=$sha) — no merged PR associated after ~6 min of retries."
 
           gh issue create \
             --title "Policy violation: direct push to $branch" \
