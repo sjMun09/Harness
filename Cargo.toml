@@ -51,7 +51,7 @@ url     = "2"
 
 # cli / tui
 clap      = { version = "4.5", default-features = false, features = ["std", "derive", "help", "usage"] }
-ratatui   = "0.28"
+ratatui   = "0.30"
 crossterm = "0.28"
 
 # fs / search / diff
