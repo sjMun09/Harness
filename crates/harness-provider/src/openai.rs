@@ -101,15 +101,6 @@ impl OpenAIProvider {
         Self::new(DEFAULT_OPENAI_MODEL)
     }
 
-    /// Override the base URL on an already-built provider. Prefer
-    /// [`Self::new_with_base_url`] when the URL is known at construction time
-    /// so key resolution sees the correct URL.
-    #[must_use]
-    pub fn with_base_url(mut self, url: Url) -> Self {
-        self.base_url = url;
-        self
-    }
-
     /// Back-door for tests — never use in prod.
     #[doc(hidden)]
     pub fn with_config(
@@ -1196,18 +1187,33 @@ mod tests {
     }
 
     #[test]
-    fn with_base_url_overrides() {
-        let p = OpenAIProvider::with_config(
-            "m",
-            SecretString::from("key".to_string()),
-            Url::parse("https://api.openai.com").unwrap(),
-        )
-        .unwrap()
-        .with_base_url(Url::parse("http://localhost:11434/v1").unwrap());
-        assert_eq!(
-            p.chat_completions_url().unwrap().as_str(),
-            "http://localhost:11434/v1/chat/completions"
-        );
+    fn new_with_base_url_localhost_succeeds_without_api_key() {
+        // Covers the main local-LLM entry point: `new_with_base_url(model,
+        // Some(localhost_url))` must succeed even with OPENAI_API_KEY unset,
+        // because `resolve_api_key` substitutes a placeholder bearer for
+        // loopback URLs. Skipped when env has OPENAI_API_KEY already set
+        // (parallel test safety — we can't mutate process env here).
+        if std::env::var("OPENAI_API_KEY").is_err() {
+            let localhost = Url::parse("http://localhost:11434/v1").unwrap();
+            let p = OpenAIProvider::new_with_base_url("qwen2.5", Some(localhost))
+                .expect("localhost URL must allow missing OPENAI_API_KEY");
+            assert_eq!(
+                p.chat_completions_url().unwrap().as_str(),
+                "http://localhost:11434/v1/chat/completions"
+            );
+        }
+    }
+
+    #[test]
+    fn new_with_base_url_remote_requires_api_key() {
+        // Mirror of the above: for a non-loopback URL, missing key must
+        // still surface as ProviderError::Auth. Skip when env supplies a
+        // key (same parallel-safety caveat).
+        if std::env::var("OPENAI_API_KEY").is_err() {
+            let remote = Url::parse("https://api.openai.com").unwrap();
+            let err = OpenAIProvider::new_with_base_url("gpt-4o", Some(remote)).unwrap_err();
+            assert!(matches!(err, ProviderError::Auth(_)));
+        }
     }
 
     // ---- End-to-end against an in-process mock OpenAI-compatible server ----
