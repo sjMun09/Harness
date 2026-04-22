@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability
+    url: https://github.com/sjMun09/Harness/security/advisories/new
+    about: 보안 취약점은 공개 이슈가 아닌 Security Advisory 로 비공개 리포트 하세요. SECURITY.md 참조.
+  - name: Design discussion
+    url: https://github.com/sjMun09/Harness/discussions
+    about: 공식 구현 요청 이전의 아이디어·설계 논의는 Discussions 로.

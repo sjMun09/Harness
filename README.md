@@ -107,7 +107,7 @@ harness ask "demandPlan_sql.xml 의 pivot 을 프리마커로 수정해줘"
 - **iter-1 (MVP)**: 완료. workspace scaffold + 6 primitives(token, perm, mem, config, fs_safe, proc) 커밋됨.
 - **iter-2**: 5 개 병렬 에이전트 통합 완료(커밋 `feat(iter-2): integrate 5 parallel-agent outputs`).
 - **iter-2 후속 통합**: TUI 엔진 브릿지(`--tui`) / `harness-testkit` 추출 / Anthropic SSE 파서 · `--base-url` · E2E HTTP 하니스 모두 머지됨.
-- **테스트** (2026-04 기준): 기본 빌드 **328 pass**, `--features tui` 빌드 **334 pass**, 실패 0.
+- **테스트** (2026-04 기준): 기본 **321 pass**, `--features tui` **327 pass**, `--features claude-code-oauth` **328 pass**, `--features tui,claude-code-oauth` **334 pass**. 실패 0.
 
 ---
 
@@ -590,7 +590,7 @@ cargo build -p harness-cli --features tui
 cargo bench -p harness-token
 ```
 
-테스트 카운트(2026-04 기준): **workspace 328 pass / 0 fail** (기본), **334 pass / 0 fail** (`--features tui`).
+테스트 카운트(2026-04 기준): **workspace 321 pass / 0 fail** (기본). `--features tui` 시 327, `--features claude-code-oauth` 시 328, 둘 다 켜면 334. 실패 없음.
 
 린트 정책:
 - `#![forbid(unsafe_code)]` 기본. `harness-tools` 만 `#![deny(unsafe_code)]` + `proc.rs` 의 `configure_session_and_pdeathsig` 에 per-function `#[allow(unsafe_code)]` (setsid + `PR_SET_PDEATHSIG`, PLAN §13).
