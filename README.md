@@ -536,6 +536,25 @@ GitHub 서버 측 Branch Protection API (classic + Rulesets) 는 **private repo 
 
 ---
 
+## Private overlay (`private/`)
+
+레포 루트의 `private/` 디렉터리는 **선택적 private submodule** 입니다
+(`sjMun09/harness-private`, 비공개). 여기엔 공개 배포에 부적합한 회사 전용
+프리셋 · 프롬프트 · 벤치마크가 들어갑니다.
+
+- **harness 본체는 이 submodule 없이도 빌드 · 동작합니다.** 상위 코드는
+  `private/` 를 `include_str!` 등으로 컴파일 타임에 참조하지 않고,
+  런타임 경로 기반 로드만 사용 (없으면 skip).
+- 외부 사용자는 submodule 을 무시하면 됩니다 (`git clone` 만으로 충분).
+- 저장소 접근 권한이 있는 사용자만:
+  ```bash
+  git submodule update --init --recursive
+  ```
+- 경계 원칙: 공개되면 안 되는 것만 `private/` 에 두고, 나머지는 모두
+  상위 레포에 둔다. 자세한 건 private repo 의 README 참고.
+
+---
+
 ## 아키텍처
 
 ```
