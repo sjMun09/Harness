@@ -861,7 +861,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
@@ -879,7 +879,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -892,7 +892,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shlex",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -902,7 +902,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -920,7 +920,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "url",
@@ -944,7 +944,7 @@ name = "harness-token"
 version = "0.1.0-dev"
 dependencies = [
  "harness-proto",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tiktoken-rs",
 ]
 
@@ -975,7 +975,7 @@ dependencies = [
  "shlex",
  "similar",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
