@@ -30,9 +30,9 @@ use harness_core::{Provider, Tool, ToolCtx};
 use harness_mem::{Record, SessionHeader};
 use harness_perm::{PermissionSnapshot, Rule};
 use harness_proto::{ContentBlock, Message, SessionId};
+use harness_provider::{is_local_url, AnthropicProvider, OpenAIProvider};
 #[cfg(feature = "claude-code-oauth")]
 use harness_provider::{load_from_claude_code_keychain, OauthError, OauthToken};
-use harness_provider::{is_local_url, AnthropicProvider, OpenAIProvider};
 use subagent_host::CliSubagentHost;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
