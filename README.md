@@ -1,5 +1,8 @@
 # Harness
 
+[![CI](https://github.com/sjMun09/Harness/actions/workflows/ci.yml/badge.svg)](https://github.com/sjMun09/Harness/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#라이선스)
+
 > **Harness 는 터미널에서 쓰는 코딩 에이전트 CLI 입니다.**
 > iTerm / zsh 같은 터미널 *안에서* `harness ask "..."` 라고 치면,
 > LLM 기반 에이전트가 파일을 읽고 · 검색하고 · 편집하고 · 테스트까지 돌려서
@@ -194,9 +197,13 @@ echo 'export PATH="$HOME/Desktop/Harness/target/release:$PATH"' >> ~/.zshrc
 cargo install --path crates/harness-cli
 ```
 
-### Claude Max OAuth 자동 폴백
+### Claude Max OAuth 자동 폴백 *(선택 피처 — 기본 off)*
 
-`ANTHROPIC_API_KEY` 없어도 `claude` 로 로그인돼 있으면 harness 가 macOS 키체인(`Claude Code-credentials`) 의 OAuth 토큰을 자동으로 씀. 즉 Max 구독자는 별도 키 불필요. 강제 선택은 `--auth oauth` / `--auth api-key`.
+> `--features claude-code-oauth` 로 빌드한 경우에만 이 경로가 활성화됩니다.
+> 기본 빌드 (`cargo build --release`) 에는 OAuth 재사용 코드가 포함되지
+> 않습니다. ToS 고려사항은 아래 §"OAuth 재사용 — TOS 주의" 참고.
+
+`ANTHROPIC_API_KEY` 없어도 `claude` 로 로그인돼 있으면 harness 가 macOS 키체인(`Claude Code-credentials`) 의 OAuth 토큰을 자동으로 씀. 즉 Max 구독자는 별도 키 불필요. 강제 선택은 `--auth oauth` / `--auth api-key` (피처 필요).
 
 **우선순위 (기본 `auto` 모드)** — OAuth 우선, API 키는 폴백. `ANTHROPIC_API_KEY` 가 쉘 env 에 남아있어도 OAuth 가 정상이면 그쪽으로 가고 과금 API 는 타지 않음.
 
