@@ -107,14 +107,14 @@ harness ask "demandPlan_sql.xml 의 pivot 을 프리마커로 수정해줘"
 - **iter-1 (MVP)**: 완료. workspace scaffold + 6 primitives(token, perm, mem, config, fs_safe, proc) 커밋됨.
 - **iter-2**: 5 개 병렬 에이전트 통합 완료(커밋 `feat(iter-2): integrate 5 parallel-agent outputs`).
 - **iter-2 후속 통합**: TUI 엔진 브릿지(`--tui`) / `harness-testkit` 추출 / Anthropic SSE 파서 · `--base-url` · E2E HTTP 하니스 모두 머지됨.
-- **테스트**: 기본 빌드 **307 pass**, `--features tui` 빌드 **313 pass**, 실패 0.
+- **테스트** (2026-04 기준): 기본 빌드 **328 pass**, `--features tui` 빌드 **334 pass**, 실패 0.
 
 ---
 
 ## 설치 & 빌드
 
 ```bash
-# 필요: Rust stable (1.83+ 권장)
+# 필요: Rust stable (1.90+ — rust-toolchain.toml 기준)
 git clone https://github.com/sjMun09/Harness.git
 cd Harness
 cargo build --release
@@ -187,9 +187,6 @@ TODO 목록
 `cargo build --release` 로 만든 바이너리는 `./target/release/harness` 에 있어서 기본 PATH 에 없다. 아래 중 택일.
 
 ```bash
-# 한 세션만
-export PATH="/Users/mun/Desktop/Harness/target/release:$PATH"
-
 # 영구
 echo 'export PATH="$HOME/Desktop/Harness/target/release:$PATH"' >> ~/.zshrc
 
@@ -199,7 +196,7 @@ cargo install --path crates/harness-cli
 
 ### Claude Max OAuth 자동 폴백
 
-`ANTHROPIC_API_KEY` 없어도 `claude` 로 로그인돼 있으면 harness 가 macOS 키체인(`com.anthropic.claude-code.*`) 의 OAuth 토큰을 자동으로 씀. 즉 Max 구독자는 별도 키 불필요. 강제 선택은 `--auth oauth` / `--auth api-key`.
+`ANTHROPIC_API_KEY` 없어도 `claude` 로 로그인돼 있으면 harness 가 macOS 키체인(`Claude Code-credentials`) 의 OAuth 토큰을 자동으로 씀. 즉 Max 구독자는 별도 키 불필요. 강제 선택은 `--auth oauth` / `--auth api-key`.
 
 **우선순위 (기본 `auto` 모드)** — OAuth 우선, API 키는 폴백. `ANTHROPIC_API_KEY` 가 쉘 env 에 남아있어도 OAuth 가 정상이면 그쪽으로 가고 과금 API 는 타지 않음.
 
@@ -227,7 +224,7 @@ export HARNESS_REFUSE_API_KEY=1
 
 ### OAuth 재사용 — TOS 주의
 
-harness 의 OAuth 모드는 Claude Code 의 keychain 토큰을 읽어 `/v1/messages` 에 직접 요청을 보냄 (`anthropic-beta: oauth-2025-04-20` + system prompt 선두에 Claude Code identity prefix 주입). 이건 Claude Code CLI 가 쓰는 것과 같은 와이어 프로토콜이지만, Anthropic 의 Max/Pro 이용약관은 공식적으로 "Claude.ai 웹 + 공식 Claude Code CLI 에서 사용" 으로 라이선스됨. 서드파티 클라이언트(harness 포함)로 이 토큰을 재사용하는 건 **명시적으로 허가된 패턴이 아님** — 2026-04 기준 Anthropic 이 **UA 기반으로 `harness` 류 서드파티 클라이언트를 rate-limit 0 에 가깝게 묶어놓은 상태**. 즉 OAuth 경로는 인증은 통과하지만 429 로 막힘. 로컬 LLM 이나 API 키 경로를 권장.
+OAuth 경로는 Claude Code 의 기존 인증을 재사용합니다. Anthropic 의 Max/Pro 이용약관 범위를 넘을 수 있으므로 사용 여부는 사용자 판단입니다. 현재 Anthropic 의 rate-limit 정책으로 인해 실무적으로 API 키 경로나 로컬 LLM 을 권장합니다.
 
 ### 로컬 LLM 으로 돌리기 (Ollama / vLLM / LM Studio / llama.cpp / MLX)
 
@@ -288,21 +285,15 @@ Harness 는 Claude Code 를 대체하려는 게 아니라 **특정 사용 결을
 | **백그라운드 Bash** | 지원 | 지원 (`run_in_background` → `BashOutput`/`KillShell`, setsid + `PR_SET_PDEATHSIG`) |
 | **롤백** | 없음 (git 수동) | `harness-tools::Transaction` — 턴 단위 스테이징, 실패 시 자동 되돌림 |
 | **SSE 프레임 캡** | 내부 구현 | 1 MiB 하드 캡(프로바이더 DoS 방어) |
-| **언어 · 런타임** | Node 18+ | Rust 1.82+ (외부 런타임 불필요) |
+| **언어 · 런타임** | Node 18+ | Rust 1.90+ (외부 런타임 불필요) |
 | **라이선스** | 비공개 | MIT OR Apache-2.0 (`Cargo.toml:9`) |
 
 ### 실측 성능
 
 > **Disclaimer.**
-> - 실측 숫자는 `bench/run.sh` 를 직접 돌려 채운다. 돌리지 않은 셀은 TBD 그대로 둔다. 날조 금지.
+> - 실측 숫자는 `bench/run.sh` 를 직접 돌려 채운다. 돌리지 않은 값은 공개하지 않는다. 날조 금지.
 > - 측정 불가해서 삭제된 지표 (이유): glob 1k 스캔 (LLM 추론과 분리 불가), 10-파일 리팩토링 (fixture 레포 + 테스트 oracle 필요), 100-턴 실패율 (n>=100 필요, 실패 정의 부재).
 > - n<10 은 지연 주장에 통계적으로 부적합. `run.sh` 기본값 n=20.
-
-| 지표 | Claude Code | Harness | 비고 |
-|---|---|---|---|
-| wall_ms (cold_start.txt 프롬프트, n=20 median) | TBD | TBD | 셸이 아니라 각 CLI 가 자체 보고한 값. Claude: `.duration_ms`. Harness: Rust `Instant::now` delta |
-| 토큰 (input + output, cold_start.txt) | TBD | TBD | Claude: `.usage.*`. Harness: `--metrics-json` |
-| 멀티모델 플래그 (Claude Code 의 Haiku 서브 호출 여부) | TBD | — | 정직한 비교의 주의: Claude Code 는 Opus 프롬프트 안에서 Haiku 서브에이전트를 섞어 씀 (`.modelUsage` 로 확인 가능) |
 
 벤치 수행 방법 및 결과 집계 형식은 [`bench/README.md`](bench/README.md) 를 참고.
 
@@ -332,7 +323,7 @@ harness  [전역옵션]  <서브커맨드>  [서브옵션]  "프롬프트"
 | `--verbose` / `-v` | DEBUG tracing 활성화. stderr 에 `[warn]` 배너 표시. |
 | `--dangerously-skip-permissions` | 모든 Ask 권한 요청을 자동 Allow 처리. CI 에서 의도적으로 쓸 때만 사용. |
 | `--trust-cwd` | 첫 로드 cwd 트러스트 프롬프트(§8.2) 생략. 비대화식 환경 전용. |
-| `--base-url <URL>` | (숨김·테스트용) Anthropic 프로바이더 base URL 오버라이드. 로컬 fake 서버 E2E 테스트에서 사용. |
+| `--base-url <URL>` | OpenAI-compatible / Anthropic base URL 오버라이드. 로컬 LLM (Ollama/vLLM/LM Studio/llama.cpp/MLX) 사용 시 이 flag 로 로컬 endpoint 지정 (`http://localhost:PORT/v1`). 자세한 건 `docs/local-llm/` 참조. |
 
 ### 서브커맨드
 
@@ -484,7 +475,7 @@ Claude Code 의 hook 모델과 호환. 4 이벤트 지원:
 ### 인증
 
 - **API key**: `export ANTHROPIC_API_KEY=sk-ant-...`. `--auth api-key` 로 강제할 수도 있음.
-- **OAuth**: macOS Keychain 에 저장된 Claude Code 토큰(`com.anthropic.claude-code.*`) 을 자동 로드. `--auth oauth` 로 강제.
+- **OAuth**: macOS Keychain 에 저장된 Claude Code 토큰(`Claude Code-credentials`) 을 자동 로드. `--auth oauth` 로 강제.
 - **모델**: `--model` / `HARNESS_MODEL` / `settings.json.model` 순서. OpenAI 모델(`gpt-*`) 지정 시 OpenAI provider 라우트.
 
 ---
@@ -599,7 +590,7 @@ cargo build -p harness-cli --features tui
 cargo bench -p harness-token
 ```
 
-테스트 카운트(2026-04 기준): **workspace 298 pass / 0 fail**.
+테스트 카운트(2026-04 기준): **workspace 328 pass / 0 fail** (기본), **334 pass / 0 fail** (`--features tui`).
 
 린트 정책:
 - `#![forbid(unsafe_code)]` 기본. `harness-tools` 만 `#![deny(unsafe_code)]` + `proc.rs` 의 `configure_session_and_pdeathsig` 에 per-function `#[allow(unsafe_code)]` (setsid + `PR_SET_PDEATHSIG`, PLAN §13).
@@ -609,7 +600,13 @@ cargo bench -p harness-token
 
 ## 라이선스
 
-TBD (현재 private; 공개 전까지 이전 코드와 동일 범위의 라이선스를 `LICENSE` 로 추가 예정).
+Harness 는 다음 중 하나의 라이선스로 제공됩니다:
+
+- Apache License 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+
+원하는 쪽을 선택해서 사용하세요. 기여물은 명시적 진술 없이
+양쪽 라이선스로 기여된 것으로 간주됩니다 (Apache-2.0 §5 기준).
 
 ---
 
