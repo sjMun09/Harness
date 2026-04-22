@@ -5,7 +5,10 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
-description  = "Harness CLI binary"
+description  = "Harness: terminal coding agent CLI — faster alternative to Claude Code for legacy backend refactoring."
+readme       = "../../README.md"
+keywords     = ["llm", "agent", "cli", "coding"]
+categories   = ["command-line-utilities"]
 
 [lints]
 workspace = true
@@ -17,6 +20,10 @@ path = "src/main.rs"
 [features]
 default = []
 tui     = ["dep:harness-tui"]
+# Opt-in: re-use a Claude Code OAuth token from the macOS keychain as the
+# `/v1/messages` credential. Off by default — see `harness-provider`'s
+# same-named feature for rationale.
+claude-code-oauth = ["harness-provider/claude-code-oauth"]
 
 [dependencies]
 harness-core     = { workspace = true }

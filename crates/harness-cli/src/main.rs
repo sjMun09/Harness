@@ -30,9 +30,9 @@ use harness_core::{Provider, Tool, ToolCtx};
 use harness_mem::{Record, SessionHeader};
 use harness_perm::{PermissionSnapshot, Rule};
 use harness_proto::{ContentBlock, Message, SessionId};
-use harness_provider::{
-    load_from_claude_code_keychain, AnthropicProvider, OauthError, OauthToken, OpenAIProvider,
-};
+use harness_provider::{is_local_url, AnthropicProvider, OpenAIProvider};
+#[cfg(feature = "claude-code-oauth")]
+use harness_provider::{load_from_claude_code_keychain, OauthError, OauthToken};
 use subagent_host::CliSubagentHost;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -116,10 +116,12 @@ struct Cli {
     #[arg(long, global = true)]
     tui: bool,
 
-    /// Override the provider base URL. Hidden — intended for end-to-end tests
-    /// that point the CLI at a local fake server. Accepts any URL parseable by
-    /// `url::Url`; currently only the Anthropic provider honours the override.
-    #[arg(long, global = true, hide = true)]
+    /// Override the provider base URL. For Anthropic: an e2e-test hook
+    /// pointing at a fake server. For OpenAI-compatible models: the entry
+    /// point for local LLM runtimes — e.g.
+    /// `--model openai/qwen2.5-coder:14b --base-url http://localhost:11434/v1`
+    /// for Ollama. Accepts any URL parseable by `url::Url`.
+    #[arg(long, global = true)]
     base_url: Option<String>,
 
     #[command(subcommand)]
@@ -860,22 +862,43 @@ fn build_provider(
     let refuse_metered = env_has("HARNESS_REFUSE_API_KEY");
 
     if is_openai_model(model) {
-        if refuse_metered {
+        // Resolve the effective base URL: explicit CLI flag > OPENAI_BASE_URL
+        // > OpenAI's default. We need this before the billing-lock check so a
+        // localhost URL (Ollama / vLLM / LM Studio / llama.cpp / MLX) can slip
+        // past — local inference isn't metered, so the lock shouldn't apply.
+        let base_url_parsed = match base_url {
+            Some(raw) => Some(
+                url::Url::parse(raw).with_context(|| format!("parse --base-url value: {raw}"))?,
+            ),
+            None => match std::env::var("OPENAI_BASE_URL") {
+                Ok(raw) => Some(
+                    url::Url::parse(&raw)
+                        .with_context(|| format!("parse OPENAI_BASE_URL value: {raw}"))?,
+                ),
+                Err(_) => None,
+            },
+        };
+        let targets_local = base_url_parsed.as_ref().map(is_local_url).unwrap_or(false);
+
+        if refuse_metered && !targets_local {
             anyhow::bail!(
                 "HARNESS_REFUSE_API_KEY=1 is set — OpenAI models are metered and blocked. \
-                 Unset the lock or switch to an Anthropic model with --auth oauth."
+                 Point --base-url at a local runtime (http://localhost:...) or switch to \
+                 an Anthropic model with --auth oauth."
             );
         }
         if matches!(choice, AuthChoice::Oauth) {
             anyhow::bail!("--auth oauth is not supported for OpenAI models; use --auth api-key");
         }
-        if base_url.is_some() {
-            anyhow::bail!("--base-url is only supported for Anthropic models");
-        }
         let model_norm = model.strip_prefix("openai/").unwrap_or(model).to_string();
-        eprintln!("[auth] api-key (OPENAI_API_KEY) provider=openai");
-        let p = OpenAIProvider::new(model_norm)
-            .context("build OpenAI provider — is OPENAI_API_KEY set?")?;
+        if targets_local {
+            eprintln!("[auth] local-llm provider=openai-compat");
+        } else {
+            eprintln!("[auth] api-key (OPENAI_API_KEY) provider=openai");
+        }
+        let p = OpenAIProvider::new_with_base_url(model_norm, base_url_parsed).context(
+            "build OpenAI provider — is OPENAI_API_KEY set? (not required for localhost)",
+        )?;
         return Ok(Arc::new(p));
     }
 
@@ -890,6 +913,7 @@ fn build_provider(
             AnthropicProvider::new(model.to_string())
                 .context("build Anthropic provider — is ANTHROPIC_API_KEY set?")?
         }
+        #[cfg(feature = "claude-code-oauth")]
         AuthChoice::Oauth => {
             let tok = load_oauth_token().context(
                 "load Claude Code OAuth token — run `claude` once to sign in, then retry",
@@ -898,6 +922,14 @@ fn build_provider(
             AnthropicProvider::with_oauth(model.to_string(), tok.access_token)
                 .context("build Anthropic provider in OAuth mode")?
         }
+        #[cfg(not(feature = "claude-code-oauth"))]
+        AuthChoice::Oauth => {
+            anyhow::bail!(
+                "OAuth auth requires building with --features claude-code-oauth. \
+                 See README for trade-offs."
+            );
+        }
+        #[cfg(feature = "claude-code-oauth")]
         AuthChoice::Auto => {
             // Prefer OAuth (subscription, zero marginal cost) over the
             // metered API key, even when ANTHROPIC_API_KEY is present —
@@ -932,6 +964,27 @@ fn build_provider(
                 }
             }
         }
+        #[cfg(not(feature = "claude-code-oauth"))]
+        AuthChoice::Auto => {
+            // Feature off: no OAuth path is compiled in, so `auto` goes
+            // straight to the API key — OAuth is never attempted.
+            if refuse_metered {
+                anyhow::bail!(
+                    "HARNESS_REFUSE_API_KEY=1 is set and this binary was built without the \
+                     `claude-code-oauth` feature — no credential path is permitted. \
+                     Unset the lock or rebuild with `--features claude-code-oauth`."
+                );
+            }
+            if !env_has("ANTHROPIC_API_KEY") {
+                anyhow::bail!(
+                    "no credential available — set ANTHROPIC_API_KEY, or rebuild with \
+                     `--features claude-code-oauth` to enable Claude Code OAuth reuse."
+                );
+            }
+            eprintln!("[auth] api-key (ANTHROPIC_API_KEY)");
+            AnthropicProvider::new(model.to_string())
+                .context("build Anthropic provider from ANTHROPIC_API_KEY")?
+        }
     };
     if let Some(raw) = base_url {
         let url = url::Url::parse(raw).with_context(|| format!("parse --base-url value: {raw}"))?;
@@ -955,6 +1008,7 @@ fn env_has(var: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(feature = "claude-code-oauth")]
 fn load_oauth_token() -> Result<OauthToken, OauthError> {
     load_from_claude_code_keychain()
 }

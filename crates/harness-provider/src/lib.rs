@@ -6,14 +6,16 @@
 #![forbid(unsafe_code)]
 
 mod anthropic;
+#[cfg(feature = "claude-code-oauth")]
 pub mod oauth;
 mod openai;
 mod sse;
 
 pub use anthropic::{AnthropicProvider, AuthMode, DEFAULT_MODEL};
+#[cfg(feature = "claude-code-oauth")]
 pub use oauth::{
     load_from_claude_code_keychain, OauthError, OauthToken, CLAUDE_CODE_SYSTEM_PREFIX,
 };
-pub use openai::{OpenAIProvider, DEFAULT_OPENAI_MODEL};
+pub use openai::{is_local_url, OpenAIProvider, DEFAULT_OPENAI_MODEL};
 
 pub use harness_core::ProviderError;

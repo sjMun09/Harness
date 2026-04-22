@@ -5,7 +5,10 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
-description  = "Harness permission dispatcher (allow/ask/deny)"
+description  = "Permission grammar (allow/ask/deny) and dispatch for Harness tool calls."
+readme       = "../../README.md"
+keywords     = ["llm", "agent", "permissions"]
+categories   = ["authentication", "config"]
 
 [lints]
 workspace = true

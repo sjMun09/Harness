@@ -5,7 +5,10 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
-description  = "Harness TUI (ratatui + crossterm). Iter 2."
+description  = "Optional ratatui-based TUI for Harness interactive sessions."
+readme       = "../../README.md"
+keywords     = ["llm", "tui", "ratatui"]
+categories   = ["command-line-interface"]
 
 [lints]
 workspace = true

@@ -33,6 +33,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Beta flag required when authenticating via a Claude Code OAuth token.
 /// Without this header the Messages API rejects OAuth calls with
 /// `authentication_error: OAuth authentication is currently not supported`.
+#[cfg(feature = "claude-code-oauth")]
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 
 /// Default per-request output cap. Anthropic Messages API requires `max_tokens`.
@@ -45,6 +46,7 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 #[derive(Debug)]
 pub enum AuthMode {
     ApiKey(SecretString),
+    #[cfg(feature = "claude-code-oauth")]
     OAuth(SecretString),
 }
 
@@ -62,6 +64,7 @@ impl std::fmt::Debug for AnthropicProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mode = match self.auth {
             AuthMode::ApiKey(_) => "api-key",
+            #[cfg(feature = "claude-code-oauth")]
             AuthMode::OAuth(_) => "oauth",
         };
         f.debug_struct("AnthropicProvider")
@@ -85,6 +88,7 @@ impl AnthropicProvider {
 
     /// Build a provider that authenticates using a Claude Code OAuth token.
     /// See `oauth::load_from_claude_code_keychain`.
+    #[cfg(feature = "claude-code-oauth")]
     pub fn with_oauth(
         model: impl Into<String>,
         token: SecretString,
@@ -159,7 +163,10 @@ impl AnthropicProvider {
 impl Provider for AnthropicProvider {
     async fn stream(&self, req: StreamRequest<'_>) -> Result<EventStream, ProviderError> {
         let url = self.messages_url()?;
+        #[cfg(feature = "claude-code-oauth")]
         let oauth_mode = matches!(self.auth, AuthMode::OAuth(_));
+        #[cfg(not(feature = "claude-code-oauth"))]
+        let oauth_mode = false;
         let body = build_request_body(&self.model, &req, self.prompt_caching, oauth_mode);
 
         let mut builder = self
@@ -170,6 +177,7 @@ impl Provider for AnthropicProvider {
             .header("anthropic-version", ANTHROPIC_VERSION);
         builder = match &self.auth {
             AuthMode::ApiKey(k) => builder.header("x-api-key", k.expose_secret()),
+            #[cfg(feature = "claude-code-oauth")]
             AuthMode::OAuth(k) => builder
                 .header("anthropic-beta", OAUTH_BETA_HEADER)
                 .bearer_auth(k.expose_secret()),
@@ -269,6 +277,7 @@ fn build_request_body(
 /// the prefix alone if the caller's system is empty). Requests that
 /// already start with the prefix are passed through unchanged.
 fn build_system_blocks(system: &str, prompt_caching: bool, oauth_mode: bool) -> Vec<Value> {
+    #[cfg(feature = "claude-code-oauth")]
     let effective = if oauth_mode {
         if system.is_empty() {
             crate::oauth::CLAUDE_CODE_SYSTEM_PREFIX.to_string()
@@ -280,6 +289,16 @@ fn build_system_blocks(system: &str, prompt_caching: bool, oauth_mode: bool) -> 
     } else if system.is_empty() {
         return Vec::new();
     } else {
+        system.to_string()
+    };
+    #[cfg(not(feature = "claude-code-oauth"))]
+    let effective = {
+        // OAuth path gated out — `oauth_mode` is always false under the
+        // default build, so no Claude Code prefix injection happens here.
+        let _ = oauth_mode;
+        if system.is_empty() {
+            return Vec::new();
+        }
         system.to_string()
     };
 
@@ -434,6 +453,7 @@ mod tests {
         assert_eq!(body.get("max_tokens"), Some(&Value::from(1024)));
     }
 
+    #[cfg(feature = "claude-code-oauth")]
     #[test]
     fn body_prepends_claude_code_prefix_in_oauth_mode() {
         let msgs = vec![Message::user("hi")];
@@ -458,6 +478,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "claude-code-oauth")]
     #[test]
     fn body_emits_prefix_alone_when_system_empty_in_oauth_mode() {
         let msgs = vec![Message::user("hi")];
@@ -477,6 +498,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "claude-code-oauth")]
     #[test]
     fn body_does_not_duplicate_prefix_when_already_present() {
         let msgs = vec![Message::user("hi")];
@@ -502,6 +524,7 @@ mod tests {
         assert_eq!(occurrences, 1, "prefix duplicated: {text:?}");
     }
 
+    #[cfg(feature = "claude-code-oauth")]
     #[test]
     fn body_omits_prefix_in_api_key_mode() {
         let msgs = vec![Message::user("hi")];

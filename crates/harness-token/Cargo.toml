@@ -5,7 +5,10 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
-description  = "Harness token counting + budget"
+description  = "Token counting (tiktoken-rs) and budget tracking for Harness."
+readme       = "../../README.md"
+keywords     = ["llm", "tiktoken", "tokens"]
+categories   = ["text-processing"]
 
 [lints]
 workspace = true

@@ -5,13 +5,21 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
-description  = "Harness provider impls (Anthropic Messages API + SSE)"
+description  = "Anthropic Messages API client + OpenAI-compatible provider + SSE parser for Harness."
+readme       = "../../README.md"
+keywords     = ["llm", "anthropic", "openai", "sse"]
+categories   = ["api-bindings", "asynchronous"]
 
 [lints]
 workspace = true
 
 [features]
 default = []
+# Opt-in: re-use a Claude Code OAuth token from the macOS keychain to
+# authenticate `/v1/messages` calls as Claude Code. This is a ToS-sensitive
+# path (impersonates Claude Code to Anthropic's API); the default public
+# build must NOT include it. See README for trade-offs.
+claude-code-oauth = []
 
 [dependencies]
 harness-proto = { workspace = true }

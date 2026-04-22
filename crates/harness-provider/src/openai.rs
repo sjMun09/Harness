@@ -58,24 +58,36 @@ impl std::fmt::Debug for OpenAIProvider {
 
 impl OpenAIProvider {
     /// Read API key from env, build a shared `reqwest::Client`.
+    ///
+    /// Local-LLM flow: when the resolved base URL points to a loopback host
+    /// (localhost / 127.0.0.1 / ::1), `OPENAI_API_KEY` is optional — local
+    /// runtimes (Ollama, vLLM, LM Studio, llama.cpp, MLX) accept any or no
+    /// bearer. For remote base URLs we still require a non-empty key so a
+    /// forgotten key can't silently ship traffic unauthenticated.
     pub fn new(model: impl Into<String>) -> Result<Self, ProviderError> {
-        let raw = std::env::var("OPENAI_API_KEY")
-            .map_err(|_| ProviderError::Auth("OPENAI_API_KEY not set".into()))?;
-        if raw.trim().is_empty() {
-            return Err(ProviderError::Auth("OPENAI_API_KEY is empty".into()));
-        }
-        let api_key = SecretString::from(raw);
+        Self::new_with_base_url(model, None)
+    }
 
-        let base_url_raw =
-            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        let base_url = Url::parse(&base_url_raw)
-            .map_err(|e| ProviderError::BadRequest(format!("invalid base url: {e}")))?;
+    /// Like [`Self::new`] but with an optional `base_url` override that takes
+    /// precedence over `OPENAI_BASE_URL`. Key resolution uses the final URL
+    /// so a CLI `--base-url` pointing at localhost correctly unlocks the
+    /// no-key path.
+    pub fn new_with_base_url(
+        model: impl Into<String>,
+        base_url_override: Option<Url>,
+    ) -> Result<Self, ProviderError> {
+        let base_url = match base_url_override {
+            Some(u) => u,
+            None => {
+                let raw = std::env::var("OPENAI_BASE_URL")
+                    .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+                Url::parse(&raw)
+                    .map_err(|e| ProviderError::BadRequest(format!("invalid base url: {e}")))?
+            }
+        };
 
-        let client = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .user_agent(concat!("harness/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let api_key = resolve_api_key(&base_url)?;
+        let client = build_http_client()?;
 
         Ok(Self {
             client,
@@ -96,11 +108,7 @@ impl OpenAIProvider {
         api_key: SecretString,
         base_url: Url,
     ) -> Result<Self, ProviderError> {
-        let client = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .user_agent(concat!("harness/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let client = build_http_client()?;
         Ok(Self {
             client,
             api_key,
@@ -119,6 +127,42 @@ impl OpenAIProvider {
         self.base_url
             .join("/v1/chat/completions")
             .map_err(|e| ProviderError::BadRequest(format!("join url: {e}")))
+    }
+}
+
+fn build_http_client() -> Result<reqwest::Client, ProviderError> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .user_agent(concat!("harness/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| ProviderError::Transport(e.to_string()))
+}
+
+/// Hostname is local-only if a lookup-free match shows it's loopback. We
+/// intentionally do NOT resolve DNS — a hostname like `host.docker.internal`
+/// could point anywhere. Users with those setups can set a placeholder key.
+pub fn is_local_url(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(d)) => {
+            let d = d.to_ascii_lowercase();
+            d == "localhost" || d == "localhost."
+        }
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+fn resolve_api_key(base_url: &Url) -> Result<SecretString, ProviderError> {
+    match std::env::var("OPENAI_API_KEY") {
+        Ok(raw) if !raw.trim().is_empty() => Ok(SecretString::from(raw)),
+        Ok(_) | Err(_) if is_local_url(base_url) => {
+            // Local runtimes accept any bearer; send a placeholder so the
+            // Authorization header is well-formed.
+            Ok(SecretString::from("local".to_string()))
+        }
+        Ok(_) => Err(ProviderError::Auth("OPENAI_API_KEY is empty".into())),
+        Err(_) => Err(ProviderError::Auth("OPENAI_API_KEY not set".into())),
     }
 }
 
@@ -1106,9 +1150,218 @@ mod tests {
     fn new_requires_env_var() {
         // Tests run with env not guaranteed; ensure the "missing key" path
         // surfaces Auth cleanly. We can't mutate env safely in parallel tests,
-        // so only check when unset. When set, skip.
-        if std::env::var("OPENAI_API_KEY").is_err() {
+        // so only check when unset. When set, skip. Also: `OPENAI_BASE_URL`
+        // must be unset (or point to a non-local URL) for this path, since a
+        // localhost URL would short-circuit the Auth check.
+        if std::env::var("OPENAI_API_KEY").is_err() && std::env::var("OPENAI_BASE_URL").is_err() {
             let err = OpenAIProvider::new("m").unwrap_err();
+            assert!(matches!(err, ProviderError::Auth(_)));
+        }
+    }
+
+    #[test]
+    fn is_local_url_recognizes_loopback() {
+        for url in [
+            "http://localhost:11434/v1",
+            "http://localhost/",
+            "http://127.0.0.1:8000/v1",
+            "http://[::1]:1234/v1",
+            "https://localhost:8443",
+        ] {
+            assert!(
+                is_local_url(&Url::parse(url).unwrap()),
+                "expected local: {url}"
+            );
+        }
+        for url in [
+            "https://api.openai.com",
+            "https://example.com:11434/v1",
+            "http://10.0.0.1:8000",
+            "http://host.docker.internal:11434/v1",
+        ] {
+            assert!(
+                !is_local_url(&Url::parse(url).unwrap()),
+                "expected non-local: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_with_base_url_localhost_succeeds_without_api_key() {
+        // Covers the main local-LLM entry point: `new_with_base_url(model,
+        // Some(localhost_url))` must succeed even with OPENAI_API_KEY unset,
+        // because `resolve_api_key` substitutes a placeholder bearer for
+        // loopback URLs. Skipped when env has OPENAI_API_KEY already set
+        // (parallel test safety — we can't mutate process env here).
+        if std::env::var("OPENAI_API_KEY").is_err() {
+            let localhost = Url::parse("http://localhost:11434/v1").unwrap();
+            let p = OpenAIProvider::new_with_base_url("qwen2.5", Some(localhost))
+                .expect("localhost URL must allow missing OPENAI_API_KEY");
+            assert_eq!(
+                p.chat_completions_url().unwrap().as_str(),
+                "http://localhost:11434/v1/chat/completions"
+            );
+        }
+    }
+
+    #[test]
+    fn new_with_base_url_remote_requires_api_key() {
+        // Mirror of the above: for a non-loopback URL, missing key must
+        // still surface as ProviderError::Auth. Skip when env supplies a
+        // key (same parallel-safety caveat).
+        if std::env::var("OPENAI_API_KEY").is_err() {
+            let remote = Url::parse("https://api.openai.com").unwrap();
+            let err = OpenAIProvider::new_with_base_url("gpt-4o", Some(remote)).unwrap_err();
+            assert!(matches!(err, ProviderError::Auth(_)));
+        }
+    }
+
+    // ---- End-to-end against an in-process mock OpenAI-compatible server ----
+    //
+    // Spins up a raw tokio::net::TcpListener, reads one HTTP request, writes
+    // an SSE-framed ChatCompletion stream, and drives OpenAIProvider::stream
+    // through it. Verifies URL joining, Authorization header, tool-call
+    // translation, and final stop_reason — the whole wire path that
+    // `cargo test -p harness-provider --test openai_stream` would cover.
+    mod mock_server_e2e {
+        use super::*;
+        use harness_core::StreamEvent as SE;
+        use harness_proto::Message;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        async fn serve_once(
+            body: &'static [u8],
+            captured_req: std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>,
+        ) -> u16 {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                // Read until we see the end of the request (CRLF-CRLF then
+                // consume declared Content-Length). Keep it cheap — we just
+                // need enough to assert on.
+                let mut buf = vec![0u8; 16 * 1024];
+                let mut total = Vec::new();
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    total.extend_from_slice(&buf[..n]);
+                    if let Some(hdr_end) = total.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let header_str = std::str::from_utf8(&total[..hdr_end]).unwrap_or("");
+                        let cl = header_str
+                            .lines()
+                            .find_map(|l| {
+                                let l = l.to_ascii_lowercase();
+                                l.strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        let have_body = total.len() - (hdr_end + 4);
+                        if have_body >= cl {
+                            break;
+                        }
+                    }
+                }
+                *captured_req.lock().await = total;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n",
+                    body.len()
+                );
+                sock.write_all(resp.as_bytes()).await.unwrap();
+                sock.write_all(body).await.unwrap();
+                sock.flush().await.unwrap();
+            });
+            port
+        }
+
+        #[tokio::test]
+        async fn stream_end_to_end_against_mock() {
+            let sse = b"data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+            let captured = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<u8>::new()));
+            let port = serve_once(sse, captured.clone()).await;
+
+            let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+            let provider = OpenAIProvider::with_config(
+                "qwen2.5",
+                SecretString::from("local".to_string()),
+                url,
+            )
+            .unwrap();
+
+            let msgs = vec![Message::user("hi")];
+            let req = StreamRequest {
+                model: "qwen2.5",
+                system: "",
+                messages: &msgs,
+                tools: &[],
+                max_tokens: 64,
+            };
+            let mut s = provider.stream(req).await.expect("stream open");
+            let mut evs = Vec::new();
+            while let Some(e) = s.next().await {
+                evs.push(e.unwrap());
+            }
+
+            // Validate event shape.
+            assert!(matches!(evs.first(), Some(SE::MessageStart { .. })));
+            let saw_text = evs.iter().any(|e| {
+                matches!(e,
+                SE::ContentBlockDelta { delta: ContentDelta::Text(s), .. } if s == "hi")
+            });
+            assert!(saw_text, "expected text delta 'hi'");
+            assert!(matches!(evs.last(), Some(SE::MessageStop)));
+
+            // Validate the wire request: POST to /v1/chat/completions with
+            // Authorization: Bearer local and a JSON body referencing the model.
+            let req_bytes = captured.lock().await.clone();
+            let req_str = String::from_utf8_lossy(&req_bytes);
+            assert!(
+                req_str.starts_with("POST /v1/chat/completions"),
+                "bad request line: {req_str}"
+            );
+            let lower = req_str.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer local"));
+            assert!(req_str.contains("\"model\":\"qwen2.5\""));
+            assert!(req_str.contains("\"stream\":true"));
+        }
+
+        #[tokio::test]
+        async fn auth_error_classifies_401() {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let body = b"{\"error\":\"bad key\"}";
+                let hdr = format!(
+                    "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                    body.len()
+                );
+                sock.write_all(hdr.as_bytes()).await.unwrap();
+                sock.write_all(body).await.unwrap();
+                sock.flush().await.unwrap();
+            });
+            let p = OpenAIProvider::with_config(
+                "m",
+                SecretString::from("bad".to_string()),
+                Url::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
+            )
+            .unwrap();
+            let req = StreamRequest {
+                model: "m",
+                system: "",
+                messages: &[],
+                tools: &[],
+                max_tokens: 8,
+            };
+            let err = match p.stream(req).await {
+                Ok(_) => panic!("expected 401 to surface as ProviderError::Auth"),
+                Err(e) => e,
+            };
             assert!(matches!(err, ProviderError::Auth(_)));
         }
     }
