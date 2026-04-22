@@ -116,8 +116,33 @@ harness ask "demandPlan_sql.xml 의 pivot 을 프리마커로 수정해줘"
 
 ## 설치 & 빌드
 
+### 방법 1 — `cargo install --git` (권장)
+
+가장 빠른 설치. 클론 없이 `~/.cargo/bin/harness` 로 바로 설치됨.
+
 ```bash
 # 필요: Rust stable (1.90+ — rust-toolchain.toml 기준)
+cargo install --git https://github.com/sjMun09/Harness --bin harness
+```
+
+> **참고**: 이 프로젝트는 crates.io 에 **publish 되지 않습니다**. `harness` / `harness-cli` 이름이
+> 이미 다른 벤치마킹 크레이트에 점유돼 있어서, `cargo install harness` 는 다른 툴을 설치합니다.
+> 반드시 위 `--git` 경로를 사용하세요. 또는 아래 릴리스 tarball 을 쓰세요.
+
+### 방법 2 — 릴리스 tarball
+
+[Releases](https://github.com/sjMun09/Harness/releases) 에서 플랫폼별 prebuild 바이너리 다운로드 (v0.1.1+ 부터 제공).
+
+- `harness-v{VER}-aarch64-apple-darwin.tar.gz` (Apple Silicon macOS)
+- `harness-v{VER}-x86_64-apple-darwin.tar.gz` (Intel macOS)
+- `harness-v{VER}-x86_64-unknown-linux-gnu.tar.gz` (Linux x86_64)
+- `SHA256SUMS.txt` 로 무결성 검증
+
+### 방법 3 — 로컬 빌드
+
+피처 커스터마이즈 (TUI, OAuth 등) 가 필요하거나 개발 작업이면:
+
+```bash
 git clone https://github.com/sjMun09/Harness.git
 cd Harness
 cargo build --release

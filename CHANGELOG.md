@@ -7,7 +7,13 @@
 
 ## [Unreleased]
 
-추후 변경 사항이 이곳에 누적됩니다.
+### Added
+
+- README 설치 섹션에 `cargo install --git` / 릴리스 tarball / 로컬 빌드 3종 경로 명시.
+
+### Changed
+
+- **배포 방식 결정**: crates.io publish 는 하지 않음. 이유: `harness` / `harness-cli` 이름이 이미 기존 벤치마킹 크레이트 (wenyuzhao/harness) 에 점유돼 전환 불가. 대신 GitHub Releases tarball + `cargo install --git` 경로 공식 지원.
 
 ## [0.1.0] - 2026-04-22
 
