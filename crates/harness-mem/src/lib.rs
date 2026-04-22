@@ -116,12 +116,13 @@ pub async fn append(path: &Path, record: &Record) -> Result<(), MemError> {
 }
 
 fn append_locked(path: &Path, payload: &[u8]) -> Result<(), MemError> {
-    use fs4::fs_std::FileExt;
+    use fs4::FileExt;
     use std::fs::OpenOptions;
     use std::io::Write;
 
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
-    f.lock_exclusive()?;
+    // Call via trait path to avoid colliding with std::fs::File::lock (stable 1.89+).
+    FileExt::lock(&f)?;
     let res: std::io::Result<()> = (|| {
         f.write_all(payload)?;
         f.flush()?;
