@@ -85,7 +85,12 @@ fn hash_cwd(cwd: &Path) -> anyhow::Result<(PathBuf, String)> {
     {
         hasher.update(canonical.to_string_lossy().as_bytes());
     }
-    let hex = format!("{:x}", hasher.finalize());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{b:02x}");
+    }
     Ok((canonical, hex))
 }
 
