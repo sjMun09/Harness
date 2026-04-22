@@ -231,13 +231,26 @@ harness 의 OAuth 모드는 Claude Code 의 keychain 토큰을 읽어 `/v1/messa
 
 ### 로컬 LLM 으로 돌리기 (Ollama / vLLM / LM Studio / llama.cpp / MLX)
 
-harness 는 OpenAI 호환 엔드포인트를 `OPENAI_BASE_URL` 로 갈아끼울 수 있으므로, 대부분의 로컬 LLM 런타임이 그대로 드랍인 대체 가능. 모델 이름을 `openai/<id>` 로 주면 `is_openai_model` 이 라우팅을 OpenAI 프로바이더로 바꾸고, 실제 요청은 `{OPENAI_BASE_URL}/v1/chat/completions` 로 감.
+harness 는 OpenAI 호환 엔드포인트를 갈아끼울 수 있으므로 대부분의 로컬 LLM 런타임이 드랍인 대체 가능. 모델 이름을 `openai/<id>` 로 주면 OpenAI 프로바이더로 라우팅되고, 실제 요청은 `{base_url}/v1/chat/completions` 로 감.
+
+**가장 간단한 예시 (Ollama + 인자 한 줄):**
 
 ```bash
-export OPENAI_BASE_URL=http://localhost:11434/v1   # 예: Ollama
-export OPENAI_API_KEY=ollama                        # 아무 값이나 (빈 문자열만 거부)
-harness ask --model openai/qwen2.5-coder:14b "이 레포 설명해줘"
+# 1회 스폰만 필요 — 이후엔 CLI 플래그로 끝
+ollama serve &
+ollama pull qwen2.5-coder:14b
+
+harness ask \
+  --model openai/qwen2.5-coder:14b \
+  --base-url http://localhost:11434/v1 \
+  "이 레포 설명해줘"
 ```
+
+`--base-url` 이 `localhost` / `127.0.0.1` / `::1` 로 resolve 되면:
+- `OPENAI_API_KEY` 환경변수 **없어도 됨**. 있으면 그대로 쓰고, 없으면 플레이스홀더 `Bearer local` 로 전송 — 로컬 런타임들은 어차피 bearer 를 검증하지 않음.
+- **`HARNESS_REFUSE_API_KEY=1` 락이 걸려 있어도 통과**. 로컬 추론은 과금 경로가 아님 — 락은 외부 API 로 흘러나가는 트래픽만 차단.
+
+환경변수로 고정하고 싶으면 `export OPENAI_BASE_URL=http://localhost:11434/v1` 해둬도 동일하게 동작. 플래그가 env 보다 우선.
 
 런타임별 세부 셋업 (포트·설치·툴콜 이슈·트러블슈팅) 은 `docs/local-llm/` 에 각각 정리되어 있음:
 

@@ -10,26 +10,35 @@
 
 ## 공통 패턴
 
-런타임이 무엇이든, harness 를 로컬 서버에 물리는 방법은 같은 3 줄입니다:
+런타임이 무엇이든, harness 를 로컬 서버에 물리는 방법은 한 줄입니다:
 
 ```bash
-export OPENAI_BASE_URL=http://localhost:<PORT>/v1
-export OPENAI_API_KEY=<any-non-empty-string>
-harness ask --model openai/<model-id> "your question"
+harness ask \
+  --model openai/<model-id> \
+  --base-url http://localhost:<PORT>/v1 \
+  "your question"
 ```
 
 왜 이게 되는지:
 
 1. **모델 prefix 로 provider 가 결정됩니다** — `--model` 값이 `openai/`,
    `gpt-`, `o1`, `o3`, `o4` 중 하나로 시작하면 harness 가 OpenAI provider
-   경로로 라우팅합니다 (`crates/harness-cli/src/main.rs:899` 의
+   경로로 라우팅합니다 (`crates/harness-cli/src/main.rs` 의
    `is_openai_model`).
 2. **선행 `openai/` 는 떨어져 나갑니다** — harness 는 `openai/` 를 벗겨낸
-   뒤 나머지를 모델명으로 `{OPENAI_BASE_URL}/v1/chat/completions` 로
-   POST 합니다. 즉 서버에 도착하는 모델명은 `<model-id>` 그 자체.
-3. **API 키는 형식상 필요합니다** — harness 는 빈 `OPENAI_API_KEY` 를
-   거부합니다. 로컬 서버는 보통 값을 검증하지 않으니 임의의 non-empty
-   문자열 (`"sk-local"`, `"ollama"`, `"mlx"` 등) 이면 됩니다.
+   뒤 나머지를 모델명으로 `{base_url}/v1/chat/completions` 로 POST 합니다.
+   즉 서버에 도착하는 모델명은 `<model-id>` 그 자체.
+3. **localhost 면 API 키 생략 가능** — `--base-url` 이 `localhost` /
+   `127.0.0.1` / `::1` 로 resolve 되면 `OPENAI_API_KEY` 환경변수가 없어도
+   OK. harness 는 placeholder bearer (`local`) 로 전송하고, 로컬 런타임은
+   보통 값을 검증하지 않습니다. 원격 base_url 에 대해선 여전히 key 필수
+   (안전 기본값).
+4. **`HARNESS_REFUSE_API_KEY=1` 락도 localhost 는 통과** — 로컬 추론은
+   과금 경로가 아니기 때문에, 락이 걸려 있어도 loopback URL 로는 그대로
+   나갑니다. 외부 과금 API 만 차단.
+
+환경변수로 고정하고 싶으면 `export OPENAI_BASE_URL=...` 해두고 `--base-url`
+플래그는 생략해도 같은 동작. 플래그가 env 보다 우선.
 
 로컬 런타임이 `/v1/chat/completions` 만 OpenAI 스펙대로 구현해 두면,
 harness 입장에선 OpenAI 가 움직이는 것과 구분되지 않습니다.
