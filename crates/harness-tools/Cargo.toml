@@ -5,7 +5,10 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
-description  = "Harness tool implementations (Read/Write/Edit/Bash/Glob/Grep)"
+description  = "Built-in tools (Read/Write/Edit/Bash/Glob/Grep/etc.) for the Harness coding agent."
+readme       = "../../README.md"
+keywords     = ["llm", "agent", "tools"]
+categories   = ["development-tools", "filesystem"]
 
 [lints]
 workspace = true

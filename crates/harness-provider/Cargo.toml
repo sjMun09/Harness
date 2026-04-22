@@ -5,7 +5,10 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
-description  = "Harness provider impls (Anthropic Messages API + SSE)"
+description  = "Anthropic Messages API client + OpenAI-compatible provider + SSE parser for Harness."
+readme       = "../../README.md"
+keywords     = ["llm", "anthropic", "openai", "sse"]
+categories   = ["api-bindings", "asynchronous"]
 
 [lints]
 workspace = true

@@ -5,7 +5,10 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
-description  = "Harness wire-protocol types (leaf crate)"
+description  = "Wire protocol types for the Harness coding agent (Message, ContentBlock, Usage, SessionId)."
+readme       = "../../README.md"
+keywords     = ["llm", "agent", "anthropic"]
+categories   = ["api-bindings", "data-structures"]
 
 [lints]
 workspace = true

@@ -5,7 +5,10 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
-description  = "Harness test utilities: mock Provider + StreamEvent constructors"
+description  = "In-process HTTP test harness (mock Anthropic/OpenAI SSE) for Harness integration tests."
+readme       = "../../README.md"
+keywords     = ["llm", "testing", "mock"]
+categories   = ["development-tools::testing"]
 
 [lints]
 workspace = true

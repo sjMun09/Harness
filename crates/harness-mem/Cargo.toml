@@ -5,7 +5,10 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
-description  = "Harness session memory (JSONL + redb + fs4)"
+description  = "Append-only session JSONL store with exclusive-lock semantics for Harness."
+readme       = "../../README.md"
+keywords     = ["llm", "agent", "session"]
+categories   = ["filesystem", "caching"]
 
 [lints]
 workspace = true

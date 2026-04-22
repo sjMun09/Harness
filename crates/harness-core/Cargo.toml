@@ -5,7 +5,10 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
-description  = "Harness kernel: traits, turn loop, config"
+description  = "Turn-loop state machine, permission dispatch, and session orchestration for the Harness coding agent."
+readme       = "../../README.md"
+keywords     = ["llm", "agent", "cli"]
+categories   = ["command-line-utilities", "development-tools"]
 
 [lints]
 workspace = true

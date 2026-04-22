@@ -5,7 +5,10 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
-description  = "Harness CLI binary"
+description  = "Harness: terminal coding agent CLI — faster alternative to Claude Code for legacy backend refactoring."
+readme       = "../../README.md"
+keywords     = ["llm", "agent", "cli", "coding"]
+categories   = ["command-line-utilities"]
 
 [lints]
 workspace = true
