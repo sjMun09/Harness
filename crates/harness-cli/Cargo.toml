@@ -20,6 +20,10 @@ path = "src/main.rs"
 [features]
 default = []
 tui     = ["dep:harness-tui"]
+# Opt-in: re-use a Claude Code OAuth token from the macOS keychain as the
+# `/v1/messages` credential. Off by default — see `harness-provider`'s
+# same-named feature for rationale.
+claude-code-oauth = ["harness-provider/claude-code-oauth"]
 
 [dependencies]
 harness-core     = { workspace = true }

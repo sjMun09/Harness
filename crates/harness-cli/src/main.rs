@@ -30,10 +30,9 @@ use harness_core::{Provider, Tool, ToolCtx};
 use harness_mem::{Record, SessionHeader};
 use harness_perm::{PermissionSnapshot, Rule};
 use harness_proto::{ContentBlock, Message, SessionId};
-use harness_provider::{
-    is_local_url, load_from_claude_code_keychain, AnthropicProvider, OauthError, OauthToken,
-    OpenAIProvider,
-};
+#[cfg(feature = "claude-code-oauth")]
+use harness_provider::{load_from_claude_code_keychain, OauthError, OauthToken};
+use harness_provider::{is_local_url, AnthropicProvider, OpenAIProvider};
 use subagent_host::CliSubagentHost;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -914,6 +913,7 @@ fn build_provider(
             AnthropicProvider::new(model.to_string())
                 .context("build Anthropic provider — is ANTHROPIC_API_KEY set?")?
         }
+        #[cfg(feature = "claude-code-oauth")]
         AuthChoice::Oauth => {
             let tok = load_oauth_token().context(
                 "load Claude Code OAuth token — run `claude` once to sign in, then retry",
@@ -922,6 +922,14 @@ fn build_provider(
             AnthropicProvider::with_oauth(model.to_string(), tok.access_token)
                 .context("build Anthropic provider in OAuth mode")?
         }
+        #[cfg(not(feature = "claude-code-oauth"))]
+        AuthChoice::Oauth => {
+            anyhow::bail!(
+                "OAuth auth requires building with --features claude-code-oauth. \
+                 See README for trade-offs."
+            );
+        }
+        #[cfg(feature = "claude-code-oauth")]
         AuthChoice::Auto => {
             // Prefer OAuth (subscription, zero marginal cost) over the
             // metered API key, even when ANTHROPIC_API_KEY is present —
@@ -956,6 +964,27 @@ fn build_provider(
                 }
             }
         }
+        #[cfg(not(feature = "claude-code-oauth"))]
+        AuthChoice::Auto => {
+            // Feature off: no OAuth path is compiled in, so `auto` goes
+            // straight to the API key — OAuth is never attempted.
+            if refuse_metered {
+                anyhow::bail!(
+                    "HARNESS_REFUSE_API_KEY=1 is set and this binary was built without the \
+                     `claude-code-oauth` feature — no credential path is permitted. \
+                     Unset the lock or rebuild with `--features claude-code-oauth`."
+                );
+            }
+            if !env_has("ANTHROPIC_API_KEY") {
+                anyhow::bail!(
+                    "no credential available — set ANTHROPIC_API_KEY, or rebuild with \
+                     `--features claude-code-oauth` to enable Claude Code OAuth reuse."
+                );
+            }
+            eprintln!("[auth] api-key (ANTHROPIC_API_KEY)");
+            AnthropicProvider::new(model.to_string())
+                .context("build Anthropic provider from ANTHROPIC_API_KEY")?
+        }
     };
     if let Some(raw) = base_url {
         let url = url::Url::parse(raw).with_context(|| format!("parse --base-url value: {raw}"))?;
@@ -979,6 +1008,7 @@ fn env_has(var: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(feature = "claude-code-oauth")]
 fn load_oauth_token() -> Result<OauthToken, OauthError> {
     load_from_claude_code_keychain()
 }

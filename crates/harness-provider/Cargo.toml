@@ -15,6 +15,11 @@ workspace = true
 
 [features]
 default = []
+# Opt-in: re-use a Claude Code OAuth token from the macOS keychain to
+# authenticate `/v1/messages` calls as Claude Code. This is a ToS-sensitive
+# path (impersonates Claude Code to Anthropic's API); the default public
+# build must NOT include it. See README for trade-offs.
+claude-code-oauth = []
 
 [dependencies]
 harness-proto = { workspace = true }
