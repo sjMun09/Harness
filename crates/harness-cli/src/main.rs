@@ -4,8 +4,10 @@
 #![forbid(unsafe_code)]
 
 mod config_import;
+mod doctor;
 mod line_mode;
 mod metrics;
+mod models;
 mod redact;
 mod subagent_host;
 mod trust;
@@ -191,6 +193,12 @@ enum Cmd {
     /// Config management (settings.json).
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Print supported model naming conventions + example invocations.
+    /// Static help text; no network calls.
+    Models,
+    /// Print runtime diagnostics: auth status, trust, settings path,
+    /// effective `OPENAI_BASE_URL`, feature flags, `.harnessignore`.
+    Doctor,
 }
 
 #[derive(Subcommand, Debug)]
@@ -317,6 +325,14 @@ async fn main() -> ExitCode {
             ConfigCmd::Show => cmd_config_show().await,
             ConfigCmd::Path => cmd_config_path().await,
         },
+        Cmd::Models => {
+            models::cmd_models();
+            Ok(SessionExit::Ok)
+        }
+        Cmd::Doctor => {
+            doctor::cmd_doctor();
+            Ok(SessionExit::Ok)
+        }
     };
 
     match result {
