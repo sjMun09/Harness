@@ -52,8 +52,7 @@ pub const HOME_SENSITIVE_PREFIXES: &[&str] = &[
 
 /// Sensitive dotfiles directly under `$HOME` — matched as exact path (not
 /// prefix, since these are files, not dirs).
-pub const HOME_SENSITIVE_FILES: &[&str] =
-    &[".netrc", ".pgpass", ".npmrc", ".pypirc"];
+pub const HOME_SENSITIVE_FILES: &[&str] = &[".netrc", ".pgpass", ".npmrc", ".pypirc"];
 
 #[derive(Debug, Error)]
 pub enum PathError {
@@ -453,7 +452,11 @@ mod tests {
         let fake_home = tempdir().unwrap();
         let aws = fake_home.path().join(".aws");
         std::fs::create_dir_all(&aws).unwrap();
-        std::fs::write(aws.join("credentials"), "[default]\naws_access_key_id=AKIAx").unwrap();
+        std::fs::write(
+            aws.join("credentials"),
+            "[default]\naws_access_key_id=AKIAx",
+        )
+        .unwrap();
 
         let _g = HomeGuard::set(fake_home.path());
 
