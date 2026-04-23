@@ -26,6 +26,10 @@ impl Tool for KillShellTool {
         "KillShell"
     }
 
+    fn description(&self) -> &'static str {
+        "Terminate a running background Bash shell by its shell id."
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

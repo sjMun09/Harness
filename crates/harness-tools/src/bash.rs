@@ -112,6 +112,10 @@ impl Tool for BashTool {
         "Bash"
     }
 
+    fn description(&self) -> &'static str {
+        "Execute a shell command (argv or shell mode) with a timeout; supports background jobs tracked by shell id."
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

@@ -22,6 +22,10 @@ impl Tool for RollbackTool {
         "Rollback"
     }
 
+    fn description(&self) -> &'static str {
+        "Revert every file Edit/Write touched this session to its pre-session state; use after a failed multi-file refactor."
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

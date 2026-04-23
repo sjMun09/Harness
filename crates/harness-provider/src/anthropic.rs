@@ -367,7 +367,6 @@ mod tests {
         tools: &'a [ToolSpec],
     ) -> StreamRequest<'a> {
         StreamRequest {
-            model: "claude-opus-4-7",
             system,
             messages,
             tools,

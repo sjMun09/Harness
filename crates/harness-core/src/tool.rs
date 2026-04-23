@@ -24,6 +24,12 @@ pub trait Tool: Send + Sync {
     /// Stable identifier. Matches wire `tool_use.name`.
     fn name(&self) -> &str;
 
+    /// One-sentence description shown to the model alongside the schema.
+    /// Required — every Tool impl must provide something concrete so the model
+    /// understands when to pick this tool over a sibling. Keep to a single
+    /// short English sentence; detailed usage goes in the JSON Schema docs.
+    fn description(&self) -> &'static str;
+
     /// JSON Schema of the `input` object. Sent verbatim to the provider.
     fn schema(&self) -> Value;
 

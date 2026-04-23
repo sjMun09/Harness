@@ -10,10 +10,12 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 use harness_perm::Decision;
 use harness_proto::{ContentBlock, Message, Role, StopReason, Usage};
+use harness_token::{Budget, TiktokenEstimator, TokenEstimator};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::compaction::{self, CompactionOptions};
 use crate::hooks::{HookAction, HookDispatcher, HookEvent};
 use crate::plan_gate::{GateOutcome, PlanGateState};
 use crate::provider::{
@@ -26,6 +28,21 @@ use crate::turn::{BlockState, FinalizeError};
 /// re-submits the same request; bounded so a persistently broken provider
 /// response cannot spin forever.
 pub const MAX_FINALIZE_RETRIES: u32 = 2;
+
+/// Max number of whole-turn retries triggered by a retryable provider error
+/// (transport failure, 5xx, 429 rate limit). Backoff is exponential
+/// (100 ms / 400 ms / 1 600 ms) capped at 3 attempts. Respects `Retry-After`
+/// when present.
+pub const MAX_PROVIDER_RETRIES: u32 = 3;
+
+/// Default model context window used when the caller does not override
+/// `compaction_context_window`. 200k matches Claude Opus/Sonnet.
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
+
+/// Default compaction trigger — fraction of the context window at which
+/// `compact()` runs before the next turn's request. 0.75 leaves comfortable
+/// headroom for the model's response.
+pub const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.75;
 
 /// Why a turn ended early. PLAN §3.2 (TaskStop).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,7 +201,7 @@ pub async fn run_turn_with_outcome(
         .iter()
         .map(|t| ToolSpec {
             name: t.name().to_string(),
-            description: String::new(),
+            description: t.description().to_string(),
             input_schema: t.schema(),
         })
         .collect();
@@ -195,6 +212,13 @@ pub async fn run_turn_with_outcome(
 
     let system_full = apply_session_start_hook(&ctx.hooks, &system).await;
 
+    // Compaction knobs — overridable at runtime via env vars so the CLI (and
+    // tests) can tune without adding new `EngineInputs` fields. Defaults land
+    // at 75% of a 200k-token Claude context window.
+    let context_window = env_u64("HARNESS_CONTEXT_WINDOW").unwrap_or(DEFAULT_CONTEXT_WINDOW);
+    let threshold = env_f64("HARNESS_COMPACTION_THRESHOLD").unwrap_or(DEFAULT_COMPACTION_THRESHOLD);
+    let estimator = TiktokenEstimator;
+
     let mut messages = initial;
     for turn_idx in 0..max_turns {
         if let Some(tok) = cancel.as_ref() {
@@ -202,6 +226,18 @@ pub async fn run_turn_with_outcome(
                 return Ok(cancelled_outcome(messages, None));
             }
         }
+
+        // Compaction gate: estimate pending-request tokens (system + history)
+        // against a `Budget` sized to the configured threshold. If tripped,
+        // drop the oldest turns and log a meta note.
+        maybe_compact(
+            &mut messages,
+            &system_full,
+            context_window,
+            threshold,
+            &estimator,
+        );
+
         debug!(turn = turn_idx, "turn: open stream");
         emit(&event_sink, TurnEvent::TurnStart { turn_idx });
 
@@ -259,6 +295,106 @@ fn cancelled_outcome(mut messages: Vec<Message>, partial: Option<Message>) -> Tu
     }
 }
 
+fn env_u64(key: &str) -> Option<u64> {
+    std::env::var(key).ok().and_then(|v| v.trim().parse().ok())
+}
+
+fn env_f64(key: &str) -> Option<f64> {
+    std::env::var(key).ok().and_then(|v| v.trim().parse().ok())
+}
+
+/// Estimate the token footprint of the pending request (system prompt +
+/// message history) and, if it crosses `threshold * context_window`, run
+/// `compaction::compact()` and swap in the trimmed slice.
+///
+/// Matches PLAN §3.2 / §5.11: a no-op when under budget, otherwise replaces
+/// the history with `[synthetic note, retained_tail...]` and emits a meta
+/// `tracing::info!` line naming the before/after token counts. The session
+/// JSONL `meta` record is written by the CLI caller (outside the engine).
+fn maybe_compact(
+    messages: &mut Vec<Message>,
+    system: &str,
+    context_window: u64,
+    threshold: f64,
+    estimator: &dyn TokenEstimator,
+) {
+    if context_window == 0 || messages.is_empty() {
+        return;
+    }
+    // Convert the threshold into the Budget cap directly. Budget applies a
+    // 0.9 safety factor on top, so we pre-undo that to land on exactly
+    // `threshold * context_window` trigger.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let cap = {
+        let raw = (context_window as f64) * threshold / harness_token::BUDGET_SAFETY_FACTOR;
+        raw as u64
+    };
+    let before = estimate_request_tokens(system, messages, estimator);
+    let mut budget = Budget::new(cap);
+    budget.add(Usage {
+        input_tokens: before,
+        output_tokens: 0,
+        ..Usage::default()
+    });
+    if !budget.exceeded() {
+        return;
+    }
+    // Compaction target matches the trigger threshold — aim to land back
+    // safely under it. `keep_recent_turns` floor of 4 matches
+    // `CompactionOptions::default_for_200k`.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let target_tokens = ((context_window as f64) * threshold) as usize;
+    let opts = CompactionOptions {
+        target_tokens,
+        keep_recent_turns: 4,
+    };
+    let r = compaction::compact(messages, estimator, &opts);
+    if !r.changed() {
+        return;
+    }
+    let after = estimate_request_tokens(system, &r.messages, estimator) as u64;
+    info!(
+        before = before,
+        after = after,
+        dropped_turns = r.dropped_turns,
+        kept_from_turn = ?r.kept_from_turn,
+        "context compacted: {before} -> {after} tokens"
+    );
+    *messages = r.messages;
+}
+
+/// Sum estimator tokens across the system prompt plus every message's text
+/// payloads (Text / ToolUse.input / ToolResult.content).
+fn estimate_request_tokens(
+    system: &str,
+    messages: &[Message],
+    estimator: &dyn TokenEstimator,
+) -> u64 {
+    let mut total: u64 = estimator.count(system) as u64;
+    for m in messages {
+        for b in &m.content {
+            let c = match b {
+                ContentBlock::Text { text, .. } => estimator.count(text),
+                ContentBlock::ToolUse { name, input, .. } => {
+                    let rendered = serde_json::to_string(input).unwrap_or_default();
+                    estimator.count(name) + estimator.count(&rendered)
+                }
+                ContentBlock::ToolResult { content, .. } => estimator.count(content),
+            };
+            total = total.saturating_add(c as u64);
+        }
+    }
+    total
+}
+
 async fn apply_session_start_hook(hooks: &HookDispatcher, system: &str) -> String {
     if !hooks.has(HookEvent::SessionStart) {
         return system.to_string();
@@ -300,6 +436,7 @@ async fn drive_one_turn(
     cancel: Option<&CancellationToken>,
 ) -> Result<DriveOutcome, anyhow::Error> {
     let mut finalize_retries = 0u32;
+    let mut provider_retries = 0u32;
     loop {
         if let Some(tok) = cancel {
             if tok.is_cancelled() {
@@ -307,27 +444,39 @@ async fn drive_one_turn(
             }
         }
         let req = StreamRequest {
-            model: "",
             system,
             messages,
             tools,
             max_tokens: 0,
         };
 
-        let stream = if let Some(tok) = cancel {
+        let stream_res = if let Some(tok) = cancel {
             tokio::select! {
                 biased;
                 () = tok.cancelled() => {
                     return Ok(DriveOutcome::Cancelled { partial: None });
                 }
-                s = provider.stream(req) => s
-                    .map_err(|e| anyhow::anyhow!("provider stream open: {e}"))?,
+                s = provider.stream(req) => s,
             }
         } else {
-            provider
-                .stream(req)
-                .await
-                .map_err(|e| anyhow::anyhow!("provider stream open: {e}"))?
+            provider.stream(req).await
+        };
+
+        let stream = match stream_res {
+            Ok(s) => s,
+            Err(e) if e.is_retryable() && provider_retries < MAX_PROVIDER_RETRIES => {
+                let delay = retry_delay(provider_retries, e.retry_after());
+                provider_retries += 1;
+                warn!(
+                    error = %e,
+                    attempt = provider_retries,
+                    backoff_ms = delay.as_millis() as u64,
+                    "provider stream open failed — backing off and retrying",
+                );
+                sleep_or_cancel(delay, cancel).await;
+                continue;
+            }
+            Err(e) => return Err(anyhow::anyhow!("provider stream open: {e}")),
         };
 
         match consume_stream(stream, cancel).await {
@@ -361,8 +510,50 @@ async fn drive_one_turn(
                 continue;
             }
             Err(DriveErr::Finalize(e)) => return Err(anyhow::anyhow!("finalize: {e}")),
+            Err(DriveErr::Provider(e))
+                if e.is_retryable() && provider_retries < MAX_PROVIDER_RETRIES =>
+            {
+                let delay = retry_delay(provider_retries, e.retry_after());
+                provider_retries += 1;
+                warn!(
+                    error = %e,
+                    attempt = provider_retries,
+                    backoff_ms = delay.as_millis() as u64,
+                    "provider stream error — backing off and retrying",
+                );
+                sleep_or_cancel(delay, cancel).await;
+                continue;
+            }
             Err(DriveErr::Provider(e)) => return Err(anyhow::anyhow!("provider: {e}")),
         }
+    }
+}
+
+/// Exponential backoff for provider retries (100 ms / 400 ms / 1 600 ms).
+/// If the provider reported an explicit `Retry-After`, use the larger of
+/// that and the backoff so we never probe sooner than the server asked.
+fn retry_delay(attempt: u32, retry_after: Option<std::time::Duration>) -> std::time::Duration {
+    // 100ms * 4^attempt: 100 / 400 / 1600
+    let exp = 100u64.saturating_mul(4u64.saturating_pow(attempt));
+    let backoff = std::time::Duration::from_millis(exp);
+    match retry_after {
+        Some(ra) if ra > backoff => ra,
+        _ => backoff,
+    }
+}
+
+/// Sleep for `delay` but wake early on cancel. Never fails — cancel during
+/// the sleep simply shortens the wait; the outer loop's cancel check picks
+/// it up on the next iteration.
+async fn sleep_or_cancel(delay: std::time::Duration, cancel: Option<&CancellationToken>) {
+    if let Some(tok) = cancel {
+        tokio::select! {
+            biased;
+            () = tok.cancelled() => {}
+            () = tokio::time::sleep(delay) => {}
+        }
+    } else {
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -477,6 +668,14 @@ async fn consume_stream(
             }
             StreamEvent::MessageStop => break,
             StreamEvent::Ping => {}
+            StreamEvent::Error(msg) => {
+                // Anthropic mid-stream `event: error` frames are terminal.
+                // Previously mapped to Ping, causing the engine to hang
+                // waiting for a MessageStop that would never arrive.
+                return Err(DriveErr::Provider(ProviderError::Transport(format!(
+                    "provider stream error: {msg}"
+                ))));
+            }
         }
     }
     Ok(ConsumeOutcome::Completed(acc))
@@ -502,7 +701,8 @@ async fn dispatch_tool_uses(
     tool_uses: &[(String, String, Value)],
     event_sink: &Option<EventSink>,
 ) -> Vec<ContentBlock> {
-    let mut out = Vec::with_capacity(tool_uses.len());
+    // Phase 1: emit ToolCallStart for every call in input order so the line
+    // renderer shows consistent "entering" banners before any call resolves.
     for (id, name, input) in tool_uses {
         let preview = tool_map
             .get(name)
@@ -516,8 +716,24 @@ async fn dispatch_tool_uses(
                 preview,
             },
         );
-        let result = dispatch_one(tool_map, ctx, plan_gate, id, name, input.clone()).await;
-        let (ok, head) = tool_result_to_head(&result);
+    }
+
+    // Phase 2: dispatch every tool_use concurrently via `join_all`. Each child
+    // sees its own grandchild cancel token (PLAN §2.2) so cancel propagates
+    // from the turn-level token without a tool being able to cancel a sibling.
+    let futures = tool_uses.iter().map(|(id, name, input)| {
+        let child_ctx = ctx.with_cancel(child_cancel(&ctx.cancel));
+        let id = id.clone();
+        let name = name.clone();
+        let input = input.clone();
+        async move { dispatch_one(tool_map, &child_ctx, plan_gate, &id, &name, input).await }
+    });
+    let results: Vec<ContentBlock> = futures_util::future::join_all(futures).await;
+
+    // Phase 3: emit ToolCallEnd in the original input order (results are
+    // index-aligned with `tool_uses`).
+    for ((id, name, _), result) in tool_uses.iter().zip(results.iter()) {
+        let (ok, head) = tool_result_to_head(result);
         emit(
             event_sink,
             TurnEvent::ToolCallEnd {
@@ -527,9 +743,9 @@ async fn dispatch_tool_uses(
                 summary_head: head,
             },
         );
-        out.push(result);
     }
-    out
+
+    results
 }
 
 /// Extract `(ok, first_non_empty_line)` from a `ContentBlock::ToolResult`.
@@ -740,6 +956,9 @@ mod tests {
             fn name(&self) -> &str {
                 "Edit"
             }
+            fn description(&self) -> &'static str {
+                "test echo edit"
+            }
             fn schema(&self) -> Value {
                 json!({"type": "object"})
             }
@@ -875,6 +1094,9 @@ mod tests {
         impl Tool for Echo {
             fn name(&self) -> &str {
                 "Echo"
+            }
+            fn description(&self) -> &'static str {
+                "test echo tool"
             }
             fn schema(&self) -> Value {
                 json!({"type":"object"})
@@ -1194,5 +1416,385 @@ mod tests {
         assert!(!grand.is_cancelled());
         parent.cancel();
         assert!(grand.is_cancelled());
+    }
+
+    /// Parallel dispatch contract: several tool_use blocks in a single
+    /// assistant turn are issued concurrently (wall-clock faster than the
+    /// sequential sum of their sleeps) but the returned ToolResults keep the
+    /// original input order (1:1 tool_use_id correspondence).
+    #[tokio::test]
+    async fn parallel_tool_dispatch_preserves_order_and_runs_concurrently() {
+        use std::time::Duration;
+        use tokio::time::Instant;
+
+        /// Sleeps for `delay_ms` then echoes its `tag`. Each call writes a
+        /// `start` timestamp into a shared vec so the test can verify the
+        /// calls overlap in time.
+        struct SleepEcho {
+            tag: &'static str,
+            delay_ms: u64,
+            starts: Arc<Mutex<Vec<(String, Instant)>>>,
+        }
+        #[async_trait]
+        impl Tool for SleepEcho {
+            fn name(&self) -> &str {
+                self.tag
+            }
+            fn description(&self) -> &'static str {
+                "sleep-echo test tool"
+            }
+            fn schema(&self) -> Value {
+                json!({"type":"object"})
+            }
+            fn preview(&self, _input: &Value) -> crate::tool::Preview {
+                crate::tool::Preview {
+                    summary_line: self.tag.into(),
+                    detail: None,
+                }
+            }
+            async fn call(&self, _input: Value, _ctx: ToolCtx) -> Result<ToolOutput, ToolError> {
+                self.starts
+                    .lock()
+                    .unwrap()
+                    .push((self.tag.to_string(), Instant::now()));
+                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+                Ok(ToolOutput {
+                    summary: format!("done:{}", self.tag),
+                    detail_path: None,
+                    stream: None,
+                })
+            }
+        }
+
+        let starts: Arc<Mutex<Vec<(String, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(SleepEcho {
+                tag: "A",
+                delay_ms: 120,
+                starts: starts.clone(),
+            }) as Arc<dyn Tool>,
+            Arc::new(SleepEcho {
+                tag: "B",
+                delay_ms: 120,
+                starts: starts.clone(),
+            }),
+            Arc::new(SleepEcho {
+                tag: "C",
+                delay_ms: 120,
+                starts: starts.clone(),
+            }),
+        ];
+
+        // Assistant turn producing three tool_use blocks A, B, C in that order.
+        let mk_use = |index: usize, name: &str, id: &str| {
+            vec![
+                StreamEvent::ContentBlockStart {
+                    index,
+                    block: ContentBlockHeader::ToolUse {
+                        id: id.into(),
+                        name: name.into(),
+                    },
+                },
+                StreamEvent::ContentBlockDelta {
+                    index,
+                    delta: crate::provider::ContentDelta::InputJson("{}".into()),
+                },
+                StreamEvent::ContentBlockStop { index },
+            ]
+        };
+        let mut call_turn = vec![StreamEvent::MessageStart {
+            message_id: "m".into(),
+            usage: Usage::default(),
+        }];
+        call_turn.extend(mk_use(0, "A", "tu_a"));
+        call_turn.extend(mk_use(1, "B", "tu_b"));
+        call_turn.extend(mk_use(2, "C", "tu_c"));
+        call_turn.push(StreamEvent::MessageDelta {
+            stop_reason: Some(StopReason::ToolUse),
+            usage: Usage::default(),
+        });
+        call_turn.push(StreamEvent::MessageStop);
+
+        let stop_turn = vec![
+            StreamEvent::MessageStart {
+                message_id: "m".into(),
+                usage: Usage::default(),
+            },
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                block: ContentBlockHeader::Text,
+            },
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::provider::ContentDelta::Text("done".into()),
+            },
+            StreamEvent::ContentBlockStop { index: 0 },
+            StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage: Usage::default(),
+            },
+            StreamEvent::MessageStop,
+        ];
+        let provider = mk_provider(vec![call_turn, stop_turn]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = mk_ctx(dir.path());
+        ctx.permission = PermissionSnapshot::new(
+            vec![],
+            vec![
+                harness_perm::Rule::parse("A").unwrap(),
+                harness_perm::Rule::parse("B").unwrap(),
+                harness_perm::Rule::parse("C").unwrap(),
+            ],
+            vec![],
+        );
+
+        let wall_start = Instant::now();
+        let msgs = run_turn(
+            EngineInputs {
+                provider,
+                tools,
+                system: "sys".into(),
+                ctx,
+                max_turns: 3,
+                plan_gate: PlanGateState::default(),
+                event_sink: None,
+                cancel: None,
+            },
+            vec![Message::user("go")],
+        )
+        .await
+        .unwrap();
+        let elapsed = wall_start.elapsed();
+
+        // Concurrency: with three 120 ms sleeps, a sequential loop would
+        // take >= 360 ms. Parallel dispatch should finish well under that —
+        // we accept anything under 280 ms (leaves headroom for slow CI).
+        assert!(
+            elapsed < Duration::from_millis(280),
+            "expected parallel dispatch (<280ms), took {elapsed:?}"
+        );
+
+        // Order: the single user+tool_results message must carry A,B,C in
+        // input order (1:1 with the tool_use blocks).
+        let tool_results_msg = msgs
+            .iter()
+            .find(|m| {
+                m.role == Role::User
+                    && m.content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            })
+            .expect("tool_results message");
+        let ids: Vec<&str> = tool_results_msg
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["tu_a", "tu_b", "tu_c"]);
+    }
+
+    /// `maybe_compact` must be a no-op when the history is well under budget.
+    #[test]
+    fn maybe_compact_noop_under_budget() {
+        let mut msgs = vec![Message::user("hi"), Message::user("there")];
+        let before_len = msgs.len();
+        maybe_compact(
+            &mut msgs,
+            "sys",
+            DEFAULT_CONTEXT_WINDOW,
+            DEFAULT_COMPACTION_THRESHOLD,
+            &harness_token::TiktokenEstimator,
+        );
+        assert_eq!(msgs.len(), before_len, "must not mutate when under budget");
+    }
+
+    /// When the computed request footprint crosses the threshold,
+    /// `maybe_compact` trims oldest turns and the caller ends up with a
+    /// shorter history whose first message is the synthetic placeholder.
+    #[test]
+    fn maybe_compact_trims_when_over_threshold() {
+        // Build 8 tiny turns. Shrink the context window to 40 tokens (word
+        // estimator semantics) so the history trips the 0.75 trigger.
+        let pad = "word ".repeat(8);
+        let mut msgs = Vec::new();
+        for _ in 0..8 {
+            msgs.push(Message::user(&pad));
+            msgs.push(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "ok".into(),
+                    cache_control: None,
+                }],
+                usage: None,
+            });
+        }
+        let before_len = msgs.len();
+
+        struct WordEstimator;
+        impl TokenEstimator for WordEstimator {
+            fn count(&self, text: &str) -> usize {
+                text.split_whitespace().count()
+            }
+        }
+
+        // 8 turns × ~8 words ≈ 64 tokens. Window=40 × 0.75 trigger → compact.
+        maybe_compact(&mut msgs, "", 40, 0.75, &WordEstimator);
+        assert!(
+            msgs.len() < before_len,
+            "expected compaction to drop turns (before {before_len}, after {})",
+            msgs.len()
+        );
+        // First message is the synthetic placeholder.
+        match &msgs[0].content[0] {
+            ContentBlock::Text { text, .. } => {
+                assert!(text.contains("elided"), "got: {text}");
+            }
+            other => panic!("expected synthetic Text, got {other:?}"),
+        }
+    }
+
+    /// Exponential backoff schedule: 100 ms / 400 ms / 1600 ms, and
+    /// `retry_after` overrides when larger.
+    #[test]
+    fn retry_delay_follows_exponential_schedule() {
+        use std::time::Duration;
+        assert_eq!(retry_delay(0, None), Duration::from_millis(100));
+        assert_eq!(retry_delay(1, None), Duration::from_millis(400));
+        assert_eq!(retry_delay(2, None), Duration::from_millis(1_600));
+        // retry_after longer than backoff wins.
+        assert_eq!(
+            retry_delay(0, Some(Duration::from_secs(5))),
+            Duration::from_secs(5)
+        );
+        // retry_after shorter than backoff is ignored.
+        assert_eq!(
+            retry_delay(2, Some(Duration::from_millis(10))),
+            Duration::from_millis(1_600)
+        );
+    }
+
+    /// Transport errors on stream open trigger up to `MAX_PROVIDER_RETRIES`
+    /// retries before surfacing the final error. Uses a provider that refuses
+    /// every call; we verify the call count grows past the first attempt.
+    /// The backoff schedule is 100 + 400 + 1600 ≈ 2.1 s total — fine in real
+    /// time, and the test exits as soon as the final attempt resolves.
+    #[tokio::test]
+    async fn transport_error_retries_before_giving_up() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct FlakyProvider {
+            attempts: Arc<AtomicU32>,
+        }
+        #[async_trait]
+        impl Provider for FlakyProvider {
+            async fn stream(
+                &self,
+                _req: StreamRequest<'_>,
+            ) -> Result<crate::provider::EventStream, ProviderError> {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                Err(ProviderError::Transport("simulated connreset".into()))
+            }
+        }
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let provider = Arc::new(FlakyProvider {
+            attempts: attempts.clone(),
+        });
+        let dir = tempfile::tempdir().unwrap();
+
+        let res = run_turn(
+            EngineInputs {
+                provider,
+                tools: Vec::new(),
+                system: String::new(),
+                ctx: mk_ctx(dir.path()),
+                max_turns: 1,
+                plan_gate: PlanGateState::default(),
+                event_sink: None,
+                cancel: None,
+            },
+            vec![Message::user("hi")],
+        )
+        .await;
+        assert!(res.is_err(), "expected final error after retries");
+        // 1 initial attempt + MAX_PROVIDER_RETRIES retries.
+        let n = attempts.load(Ordering::SeqCst);
+        assert_eq!(n, 1 + MAX_PROVIDER_RETRIES, "attempts: {n}");
+    }
+
+    /// A retryable error that resolves on attempt 2 returns a successful
+    /// turn outcome — verifies the happy-path retry loop doesn't leak errors.
+    #[tokio::test]
+    async fn transport_error_recovers_after_retry() {
+        use futures_util::stream;
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct RecoveringProvider {
+            attempts: Arc<AtomicU32>,
+        }
+        #[async_trait]
+        impl Provider for RecoveringProvider {
+            async fn stream(
+                &self,
+                _req: StreamRequest<'_>,
+            ) -> Result<crate::provider::EventStream, ProviderError> {
+                let n = self.attempts.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    return Err(ProviderError::Server(503));
+                }
+                let events = vec![
+                    Ok(StreamEvent::MessageStart {
+                        message_id: "m".into(),
+                        usage: Usage::default(),
+                    }),
+                    Ok(StreamEvent::ContentBlockStart {
+                        index: 0,
+                        block: ContentBlockHeader::Text,
+                    }),
+                    Ok(StreamEvent::ContentBlockDelta {
+                        index: 0,
+                        delta: crate::provider::ContentDelta::Text("ok".into()),
+                    }),
+                    Ok(StreamEvent::ContentBlockStop { index: 0 }),
+                    Ok(StreamEvent::MessageDelta {
+                        stop_reason: Some(StopReason::EndTurn),
+                        usage: Usage::default(),
+                    }),
+                    Ok(StreamEvent::MessageStop),
+                ];
+                Ok(Box::pin(stream::iter(events))
+                    as Pin<
+                        Box<dyn futures_core::Stream<Item = _> + Send + 'static>,
+                    >)
+            }
+        }
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let provider = Arc::new(RecoveringProvider {
+            attempts: attempts.clone(),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let msgs = run_turn(
+            EngineInputs {
+                provider,
+                tools: Vec::new(),
+                system: String::new(),
+                ctx: mk_ctx(dir.path()),
+                max_turns: 1,
+                plan_gate: PlanGateState::default(),
+                event_sink: None,
+                cancel: None,
+            },
+            vec![Message::user("hi")],
+        )
+        .await
+        .expect("second attempt should succeed");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(msgs.len() >= 2, "missing assistant reply: {msgs:?}");
     }
 }
