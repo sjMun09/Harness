@@ -432,12 +432,17 @@ async fn run_session_core(run: SessionRun) -> anyhow::Result<SessionExit> {
         prompt_sha256,
     } = run;
 
-    let cwd = std::env::current_dir().context("cwd")?;
-    if trust_cwd {
+    let raw_cwd = std::env::current_dir().context("cwd")?;
+    // Use the canonical path returned by `ensure_trusted` as the effective cwd.
+    // Closes the TOCTOU hole where `ensure_trusted` canonicalized one path and
+    // a second `current_dir()` call could observe a different (symlink-moved)
+    // one after the check.
+    let cwd = if trust_cwd {
         trust::skip_trust_check();
+        std::fs::canonicalize(&raw_cwd).unwrap_or(raw_cwd)
     } else {
-        trust::ensure_trusted(&cwd)?;
-    }
+        trust::ensure_trusted(&raw_cwd)?
+    };
 
     let provider: Arc<dyn Provider> = build_provider(&model, auth, base_url.as_deref())?;
 
@@ -664,12 +669,13 @@ async fn run_session_tui(run: SessionRun) -> anyhow::Result<SessionExit> {
         prompt_sha256: _,
     } = run;
 
-    let cwd = std::env::current_dir().context("cwd")?;
-    if trust_cwd {
+    let raw_cwd = std::env::current_dir().context("cwd")?;
+    let cwd = if trust_cwd {
         trust::skip_trust_check();
+        std::fs::canonicalize(&raw_cwd).unwrap_or(raw_cwd)
     } else {
-        trust::ensure_trusted(&cwd)?;
-    }
+        trust::ensure_trusted(&raw_cwd)?
+    };
 
     let provider: Arc<dyn Provider> = build_provider(&model, auth, base_url.as_deref())?;
     let tools = harness_tools::all_tools();
