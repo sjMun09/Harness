@@ -444,7 +444,6 @@ async fn drive_one_turn(
             }
         }
         let req = StreamRequest {
-            model: "",
             system,
             messages,
             tools,
@@ -727,9 +726,7 @@ async fn dispatch_tool_uses(
         let id = id.clone();
         let name = name.clone();
         let input = input.clone();
-        async move {
-            dispatch_one(tool_map, &child_ctx, plan_gate, &id, &name, input).await
-        }
+        async move { dispatch_one(tool_map, &child_ctx, plan_gate, &id, &name, input).await }
     });
     let results: Vec<ContentBlock> = futures_util::future::join_all(futures).await;
 
@@ -1771,7 +1768,9 @@ mod tests {
                     Ok(StreamEvent::MessageStop),
                 ];
                 Ok(Box::pin(stream::iter(events))
-                    as Pin<Box<dyn futures_core::Stream<Item = _> + Send + 'static>>)
+                    as Pin<
+                        Box<dyn futures_core::Stream<Item = _> + Send + 'static>,
+                    >)
             }
         }
 

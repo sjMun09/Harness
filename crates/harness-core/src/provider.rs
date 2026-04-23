@@ -21,9 +21,12 @@ pub struct ToolSpec {
 }
 
 /// Request parameters. MVP shape — iter 2 adds `cache_control`.
+///
+/// `model` lives on the concrete `Provider` impl (`AnthropicProvider::model`,
+/// `OpenAIProvider::model`) — it is not carried on this request because the
+/// engine cannot meaningfully override a provider's configured model mid-run.
 #[derive(Debug, Clone)]
 pub struct StreamRequest<'a> {
-    pub model: &'a str,
     pub system: &'a str,
     pub messages: &'a [Message],
     pub tools: &'a [ToolSpec],

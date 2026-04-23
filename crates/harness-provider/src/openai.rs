@@ -810,13 +810,15 @@ mod tests {
     use harness_proto::{ContentBlock, Message, Role};
 
     fn req<'a>(
-        model: &'a str,
+        _model: &'a str,
         system: &'a str,
         messages: &'a [Message],
         tools: &'a [ToolSpec],
     ) -> StreamRequest<'a> {
+        // `model` is intentionally unused: `StreamRequest` no longer carries
+        // a model field — the concrete provider holds it. We keep the arg to
+        // minimise churn in the test call sites.
         StreamRequest {
-            model,
             system,
             messages,
             tools,
@@ -1293,7 +1295,6 @@ mod tests {
 
             let msgs = vec![Message::user("hi")];
             let req = StreamRequest {
-                model: "qwen2.5",
                 system: "",
                 messages: &msgs,
                 tools: &[],
@@ -1352,7 +1353,6 @@ mod tests {
             )
             .unwrap();
             let req = StreamRequest {
-                model: "m",
                 system: "",
                 messages: &[],
                 tools: &[],
