@@ -1297,7 +1297,9 @@ async fn cmd_session_resume(
 
     cli_banner!(
         "[resume] session={} prior_messages={} model={}",
-        loaded.header.id, already, model,
+        loaded.header.id,
+        already,
+        model,
     );
 
     run_session_core(SessionRun {

@@ -108,7 +108,11 @@ fn auth_block<W: Write>(out: &mut W) -> io::Result<()> {
     if has_openai {
         line(out, Status::Ok, "OPENAI_API_KEY is set")?;
     } else {
-        line(out, Status::Warn, "OPENAI_API_KEY not set (only needed for OpenAI or non-local OpenAI-compat)")?;
+        line(
+            out,
+            Status::Warn,
+            "OPENAI_API_KEY not set (only needed for OpenAI or non-local OpenAI-compat)",
+        )?;
     }
 
     if refuse {
@@ -118,14 +122,22 @@ fn auth_block<W: Write>(out: &mut W) -> io::Result<()> {
             "HARNESS_REFUSE_API_KEY=1 (metered API paths blocked; OAuth and localhost still allowed)",
         )?;
     } else {
-        line(out, Status::Warn, "HARNESS_REFUSE_API_KEY not set (metered API paths permitted)")?;
+        line(
+            out,
+            Status::Warn,
+            "HARNESS_REFUSE_API_KEY not set (metered API paths permitted)",
+        )?;
     }
 
     // OAuth keychain status — only show on feature-enabled builds.
     #[cfg(feature = "claude-code-oauth")]
     {
         match harness_provider::load_from_claude_code_keychain() {
-            Ok(_) => line(out, Status::Ok, "Claude Code OAuth token present in keychain")?,
+            Ok(_) => line(
+                out,
+                Status::Ok,
+                "Claude Code OAuth token present in keychain",
+            )?,
             Err(e) => line(
                 out,
                 Status::Warn,
@@ -155,7 +167,11 @@ fn cwd_block<W: Write>(out: &mut W) -> io::Result<()> {
                     Status::Warn,
                     "cwd is not in the trust store — first run will prompt (or use --trust-cwd)",
                 )?,
-                Err(e) => line(out, Status::Warn, &format!("could not read trust store: {e}"))?,
+                Err(e) => line(
+                    out,
+                    Status::Warn,
+                    &format!("could not read trust store: {e}"),
+                )?,
             }
         }
         Err(e) => line(out, Status::Fail, &format!("could not read cwd: {e}"))?,
@@ -217,12 +233,19 @@ fn settings_block<W: Write>(out: &mut W) -> io::Result<()> {
         Some(p) => {
             let exists = p.exists();
             if exists {
-                line(out, Status::Ok, &format!("settings.json: {} (exists)", p.display()))?;
+                line(
+                    out,
+                    Status::Ok,
+                    &format!("settings.json: {} (exists)", p.display()),
+                )?;
             } else {
                 line(
                     out,
                     Status::Warn,
-                    &format!("settings.json: {} (not yet created — defaults in use)", p.display()),
+                    &format!(
+                        "settings.json: {} (not yet created — defaults in use)",
+                        p.display()
+                    ),
                 )?;
             }
         }
@@ -294,19 +317,28 @@ fn ignore_block<W: Write>(out: &mut W) -> io::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let p = cwd.join(".harnessignore");
     if p.exists() {
-        line(out, Status::Ok, &format!(".harnessignore: {} (exists)", p.display()))?;
+        line(
+            out,
+            Status::Ok,
+            &format!(".harnessignore: {} (exists)", p.display()),
+        )?;
     } else {
         line(
             out,
             Status::Warn,
-            &format!(".harnessignore: {} (not present — add one to tune Glob/Grep)", p.display()),
+            &format!(
+                ".harnessignore: {} (not present — add one to tune Glob/Grep)",
+                p.display()
+            ),
         )?;
     }
     Ok(())
 }
 
 fn env_nonempty(var: &str) -> bool {
-    std::env::var(var).map(|v| !v.trim().is_empty()).unwrap_or(false)
+    std::env::var(var)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

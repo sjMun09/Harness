@@ -156,8 +156,14 @@ mod tests {
     fn drive(input_text: &str) -> (Vec<u8>, AskAnswer) {
         let mut out = Vec::<u8>::new();
         let mut reader = std::io::Cursor::new(input_text.as_bytes().to_vec());
-        let ans = ask_user_inner("Bash", &json!({"command": "ls -la"}), &mut out, &mut reader, 3)
-            .expect("ask_user_inner");
+        let ans = ask_user_inner(
+            "Bash",
+            &json!({"command": "ls -la"}),
+            &mut out,
+            &mut reader,
+            3,
+        )
+        .expect("ask_user_inner");
         (out, ans)
     }
 
