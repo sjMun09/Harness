@@ -10,10 +10,12 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 use harness_perm::Decision;
 use harness_proto::{ContentBlock, Message, Role, StopReason, Usage};
+use harness_token::{Budget, TiktokenEstimator, TokenEstimator};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::compaction::{self, CompactionOptions};
 use crate::hooks::{HookAction, HookDispatcher, HookEvent};
 use crate::plan_gate::{GateOutcome, PlanGateState};
 use crate::provider::{
@@ -26,6 +28,21 @@ use crate::turn::{BlockState, FinalizeError};
 /// re-submits the same request; bounded so a persistently broken provider
 /// response cannot spin forever.
 pub const MAX_FINALIZE_RETRIES: u32 = 2;
+
+/// Max number of whole-turn retries triggered by a retryable provider error
+/// (transport failure, 5xx, 429 rate limit). Backoff is exponential
+/// (100 ms / 400 ms / 1 600 ms) capped at 3 attempts. Respects `Retry-After`
+/// when present.
+pub const MAX_PROVIDER_RETRIES: u32 = 3;
+
+/// Default model context window used when the caller does not override
+/// `compaction_context_window`. 200k matches Claude Opus/Sonnet.
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
+
+/// Default compaction trigger — fraction of the context window at which
+/// `compact()` runs before the next turn's request. 0.75 leaves comfortable
+/// headroom for the model's response.
+pub const DEFAULT_COMPACTION_THRESHOLD: f64 = 0.75;
 
 /// Why a turn ended early. PLAN §3.2 (TaskStop).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,6 +212,13 @@ pub async fn run_turn_with_outcome(
 
     let system_full = apply_session_start_hook(&ctx.hooks, &system).await;
 
+    // Compaction knobs — overridable at runtime via env vars so the CLI (and
+    // tests) can tune without adding new `EngineInputs` fields. Defaults land
+    // at 75% of a 200k-token Claude context window.
+    let context_window = env_u64("HARNESS_CONTEXT_WINDOW").unwrap_or(DEFAULT_CONTEXT_WINDOW);
+    let threshold = env_f64("HARNESS_COMPACTION_THRESHOLD").unwrap_or(DEFAULT_COMPACTION_THRESHOLD);
+    let estimator = TiktokenEstimator;
+
     let mut messages = initial;
     for turn_idx in 0..max_turns {
         if let Some(tok) = cancel.as_ref() {
@@ -202,6 +226,18 @@ pub async fn run_turn_with_outcome(
                 return Ok(cancelled_outcome(messages, None));
             }
         }
+
+        // Compaction gate: estimate pending-request tokens (system + history)
+        // against a `Budget` sized to the configured threshold. If tripped,
+        // drop the oldest turns and log a meta note.
+        maybe_compact(
+            &mut messages,
+            &system_full,
+            context_window,
+            threshold,
+            &estimator,
+        );
+
         debug!(turn = turn_idx, "turn: open stream");
         emit(&event_sink, TurnEvent::TurnStart { turn_idx });
 
@@ -257,6 +293,106 @@ fn cancelled_outcome(mut messages: Vec<Message>, partial: Option<Message>) -> Tu
         messages,
         partial_assistant,
     }
+}
+
+fn env_u64(key: &str) -> Option<u64> {
+    std::env::var(key).ok().and_then(|v| v.trim().parse().ok())
+}
+
+fn env_f64(key: &str) -> Option<f64> {
+    std::env::var(key).ok().and_then(|v| v.trim().parse().ok())
+}
+
+/// Estimate the token footprint of the pending request (system prompt +
+/// message history) and, if it crosses `threshold * context_window`, run
+/// `compaction::compact()` and swap in the trimmed slice.
+///
+/// Matches PLAN §3.2 / §5.11: a no-op when under budget, otherwise replaces
+/// the history with `[synthetic note, retained_tail...]` and emits a meta
+/// `tracing::info!` line naming the before/after token counts. The session
+/// JSONL `meta` record is written by the CLI caller (outside the engine).
+fn maybe_compact(
+    messages: &mut Vec<Message>,
+    system: &str,
+    context_window: u64,
+    threshold: f64,
+    estimator: &dyn TokenEstimator,
+) {
+    if context_window == 0 || messages.is_empty() {
+        return;
+    }
+    // Convert the threshold into the Budget cap directly. Budget applies a
+    // 0.9 safety factor on top, so we pre-undo that to land on exactly
+    // `threshold * context_window` trigger.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let cap = {
+        let raw = (context_window as f64) * threshold / harness_token::BUDGET_SAFETY_FACTOR;
+        raw as u64
+    };
+    let before = estimate_request_tokens(system, messages, estimator);
+    let mut budget = Budget::new(cap);
+    budget.add(Usage {
+        input_tokens: before,
+        output_tokens: 0,
+        ..Usage::default()
+    });
+    if !budget.exceeded() {
+        return;
+    }
+    // Compaction target matches the trigger threshold — aim to land back
+    // safely under it. `keep_recent_turns` floor of 4 matches
+    // `CompactionOptions::default_for_200k`.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let target_tokens = ((context_window as f64) * threshold) as usize;
+    let opts = CompactionOptions {
+        target_tokens,
+        keep_recent_turns: 4,
+    };
+    let r = compaction::compact(messages, estimator, &opts);
+    if !r.changed() {
+        return;
+    }
+    let after = estimate_request_tokens(system, &r.messages, estimator) as u64;
+    info!(
+        before = before,
+        after = after,
+        dropped_turns = r.dropped_turns,
+        kept_from_turn = ?r.kept_from_turn,
+        "context compacted: {before} -> {after} tokens"
+    );
+    *messages = r.messages;
+}
+
+/// Sum estimator tokens across the system prompt plus every message's text
+/// payloads (Text / ToolUse.input / ToolResult.content).
+fn estimate_request_tokens(
+    system: &str,
+    messages: &[Message],
+    estimator: &dyn TokenEstimator,
+) -> u64 {
+    let mut total: u64 = estimator.count(system) as u64;
+    for m in messages {
+        for b in &m.content {
+            let c = match b {
+                ContentBlock::Text { text, .. } => estimator.count(text),
+                ContentBlock::ToolUse { name, input, .. } => {
+                    let rendered = serde_json::to_string(input).unwrap_or_default();
+                    estimator.count(name) + estimator.count(&rendered)
+                }
+                ContentBlock::ToolResult { content, .. } => estimator.count(content),
+            };
+            total = total.saturating_add(c as u64);
+        }
+    }
+    total
 }
 
 async fn apply_session_start_hook(hooks: &HookDispatcher, system: &str) -> String {
@@ -1398,5 +1534,65 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, vec!["tu_a", "tu_b", "tu_c"]);
+    }
+
+    /// `maybe_compact` must be a no-op when the history is well under budget.
+    #[test]
+    fn maybe_compact_noop_under_budget() {
+        let mut msgs = vec![Message::user("hi"), Message::user("there")];
+        let before_len = msgs.len();
+        maybe_compact(
+            &mut msgs,
+            "sys",
+            DEFAULT_CONTEXT_WINDOW,
+            DEFAULT_COMPACTION_THRESHOLD,
+            &harness_token::TiktokenEstimator,
+        );
+        assert_eq!(msgs.len(), before_len, "must not mutate when under budget");
+    }
+
+    /// When the computed request footprint crosses the threshold,
+    /// `maybe_compact` trims oldest turns and the caller ends up with a
+    /// shorter history whose first message is the synthetic placeholder.
+    #[test]
+    fn maybe_compact_trims_when_over_threshold() {
+        // Build 8 tiny turns. Shrink the context window to 40 tokens (word
+        // estimator semantics) so the history trips the 0.75 trigger.
+        let pad = "word ".repeat(8);
+        let mut msgs = Vec::new();
+        for _ in 0..8 {
+            msgs.push(Message::user(&pad));
+            msgs.push(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "ok".into(),
+                    cache_control: None,
+                }],
+                usage: None,
+            });
+        }
+        let before_len = msgs.len();
+
+        struct WordEstimator;
+        impl TokenEstimator for WordEstimator {
+            fn count(&self, text: &str) -> usize {
+                text.split_whitespace().count()
+            }
+        }
+
+        // 8 turns × ~8 words ≈ 64 tokens. Window=40 × 0.75 trigger → compact.
+        maybe_compact(&mut msgs, "", 40, 0.75, &WordEstimator);
+        assert!(
+            msgs.len() < before_len,
+            "expected compaction to drop turns (before {before_len}, after {})",
+            msgs.len()
+        );
+        // First message is the synthetic placeholder.
+        match &msgs[0].content[0] {
+            ContentBlock::Text { text, .. } => {
+                assert!(text.contains("elided"), "got: {text}");
+            }
+            other => panic!("expected synthetic Text, got {other:?}"),
+        }
     }
 }
