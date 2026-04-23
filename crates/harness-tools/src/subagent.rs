@@ -55,6 +55,10 @@ impl Tool for SubagentTool {
         SUBAGENT_TOOL_NAME
     }
 
+    fn description(&self) -> &'static str {
+        "Spawn a depth-capped sub-agent to research a focused question and return a short summary without polluting the parent context."
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -204,6 +208,7 @@ mod tests {
             subagent: host,
             depth,
             tx: None,
+            ask_prompt: None,
         }
     }
 

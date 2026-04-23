@@ -35,7 +35,11 @@ pub const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const DEFAULT_MAX_TOKENS: u32 = 8192;
+/// Conservative default for local-LLM friendliness. Ollama ships with
+/// `num_ctx=4096`; asking for 8192 output tokens routinely triggers a server
+/// 500 once prompt tokens are added on top. 2048 keeps small local models in
+/// their default context budget. Overridable via `StreamRequest.max_tokens`.
+const DEFAULT_MAX_TOKENS: u32 = 2048;
 /// Frame size cap — anything bigger is a DoS against the parser.
 const MAX_FRAME_BYTES: usize = 1 << 20; // 1 MiB
 
@@ -88,11 +92,13 @@ impl OpenAIProvider {
 
         let api_key = resolve_api_key(&base_url)?;
         let client = build_http_client()?;
+        let model = model.into();
+        log_init(&base_url, &model);
 
         Ok(Self {
             client,
             api_key,
-            model: model.into(),
+            model,
             base_url,
         })
     }
@@ -109,10 +115,12 @@ impl OpenAIProvider {
         base_url: Url,
     ) -> Result<Self, ProviderError> {
         let client = build_http_client()?;
+        let model = model.into();
+        log_init(&base_url, &model);
         Ok(Self {
             client,
             api_key,
-            model: model.into(),
+            model,
             base_url,
         })
     }
@@ -128,6 +136,22 @@ impl OpenAIProvider {
             .join("/v1/chat/completions")
             .map_err(|e| ProviderError::BadRequest(format!("join url: {e}")))
     }
+}
+
+/// Log the resolved base URL + model once at provider construction so users
+/// can verify where traffic is actually headed. API key is never logged —
+/// `SecretString` is not formatted here and we intentionally do not reference
+/// it. Critical for local-LLM debugging: "did harness hit Ollama or the
+/// public API?" has been a recurring first-time-user confusion.
+fn log_init(base_url: &Url, model: &str) {
+    tracing::info!(
+        target: "harness_provider::openai",
+        provider = "openai-compat",
+        base_url = %base_url,
+        model = model,
+        local = is_local_url(base_url),
+        "openai provider initialized"
+    );
 }
 
 fn build_http_client() -> Result<reqwest::Client, ProviderError> {
@@ -231,10 +255,14 @@ pub(crate) fn classify_http_error(
 /// - `stream_options.include_usage: true` so the final chunk carries usage
 ///   (OpenAI only emits `usage` if we opt in).
 pub(crate) fn build_request_body(model: &str, req: &StreamRequest<'_>) -> Value {
-    let max_tokens = if req.max_tokens == 0 {
-        DEFAULT_MAX_TOKENS
-    } else {
+    let max_tokens = if req.max_tokens > 0 {
         req.max_tokens
+    } else {
+        tracing::debug!(
+            default = DEFAULT_MAX_TOKENS,
+            "openai: StreamRequest.max_tokens not set; falling back to default"
+        );
+        DEFAULT_MAX_TOKENS
     };
 
     let mut messages: Vec<Value> = Vec::with_capacity(req.messages.len() + 1);
@@ -580,10 +608,13 @@ fn process_frame(frame: &str, state: &mut StreamState) -> Result<FrameOutcome, P
     let chunk: ChatCompletionChunk = serde_json::from_str(&data)
         .map_err(|e| ProviderError::Parse(format!("openai chunk json: {e}")))?;
 
-    Ok(FrameOutcome::Events(translate_chunk(chunk, state)))
+    Ok(FrameOutcome::Events(translate_chunk(chunk, state)?))
 }
 
-fn translate_chunk(chunk: ChatCompletionChunk, state: &mut StreamState) -> Vec<StreamEvent> {
+fn translate_chunk(
+    chunk: ChatCompletionChunk,
+    state: &mut StreamState,
+) -> Result<Vec<StreamEvent>, ProviderError> {
     let mut out = Vec::new();
 
     if !state.started {
@@ -622,9 +653,14 @@ fn translate_chunk(chunk: ChatCompletionChunk, state: &mut StreamState) -> Vec<S
             }
         }
 
-        // Tool-call deltas.
-        for tc in choice.delta.tool_calls {
-            let entry = state.tool_calls.entry(tc.index).or_insert_with(|| {
+        // Tool-call deltas. When the runtime omits `tool_calls[i].index` (seen
+        // on Ollama and some llama.cpp `--jinja` templates) fall back to the
+        // element's position within this delta's array. This preserves
+        // single-call correctness; multi-call interleaving without `index` is
+        // unrecoverable by nature and we document that in docs/local-llm.
+        for (array_pos, tc) in choice.delta.tool_calls.into_iter().enumerate() {
+            let tc_index = tc.index.unwrap_or(array_pos);
+            let entry = state.tool_calls.entry(tc_index).or_insert_with(|| {
                 // Reserve a harness index now so ordering is stable.
                 let idx = state.next_block_index;
                 state.next_block_index += 1;
@@ -685,12 +721,26 @@ fn translate_chunk(chunk: ChatCompletionChunk, state: &mut StreamState) -> Vec<S
         // [DONE] / EOF so usage (which arrives in a later chunk with
         // choices:[]) has a chance to accumulate first.
         if let Some(reason) = choice.finish_reason {
-            state.stop_reason = Some(map_finish_reason(&reason));
+            state.stop_reason = Some(map_finish_reason(&reason)?);
         }
     }
 
-    out
+    Ok(out)
 }
+
+// TODO(local-llm): text-based tool-call fallback.
+// Many small local models (qwen2.5-coder:7b, gemma:7b) can't reliably emit
+// `tool_calls` JSON — they revert to natural language like
+// `I would run: Bash('ls')` or a `<tool>...</tool>` XML-ish envelope.
+// A minimal fallback would: at `flush_terminal`, if no tool_call blocks were
+// opened AND the text block matches a pattern like
+//   `<tool:(\w+)>\s*(\{[\s\S]*?\})\s*</tool>`
+// then synthesize a ContentBlockStart(ToolUse) + InputJson delta + Stop, and
+// elide the matching substring from the text block. Non-trivial because the
+// text block has already been streamed out as deltas; we'd need a buffering
+// mode for local providers only. Deferred until tasks 1-5 are in production
+// and we can validate the pattern against real model outputs rather than
+// guessing. See docs/local-llm/README.md "툴콜링" section.
 
 /// Called on `[DONE]` or on clean EOF after at least one chunk: emit
 /// `ContentBlockStop` for each open block, then `MessageDelta` + `MessageStop`.
@@ -718,14 +768,38 @@ fn flush_terminal(state: &mut StreamState, queue: &mut VecDeque<StreamEvent>) {
     queue.push_back(StreamEvent::MessageStop);
 }
 
-fn map_finish_reason(s: &str) -> StopReason {
+/// Map an OpenAI / OpenAI-compatible `finish_reason` to the provider-neutral
+/// [`StopReason`]. Local runtimes (Ollama, llama.cpp, MLX servers) emit a
+/// wider zoo of values than the OpenAI reference — we handle the common
+/// variants explicitly and `warn!` on anything unknown so truncation or a new
+/// upstream value is visible in logs rather than silently mapped to EndTurn.
+///
+/// Returns `Err(ProviderError::BadRequest)` for `"content_filter"` — callers
+/// expect the loop to stop loudly so the user sees their prompt was refused
+/// rather than blaming a quiet "model had nothing to say".
+fn map_finish_reason(s: &str) -> Result<StopReason, ProviderError> {
     match s {
-        "stop" => StopReason::EndTurn,
-        "tool_calls" | "function_call" => StopReason::ToolUse,
-        "length" => StopReason::MaxTokens,
-        // Defensive default — unknown finish reasons treated as end_turn rather
-        // than silently dropping the stop signal.
-        _ => StopReason::EndTurn,
+        // Normal turn completion. "end_turn" is Anthropic's name that some
+        // shim layers pass through untouched.
+        "stop" | "end_turn" | "eos" => Ok(StopReason::EndTurn),
+        // Tool call completion. "function_call" is the deprecated OpenAI name.
+        "tool_calls" | "function_call" => Ok(StopReason::ToolUse),
+        // Budget exhaustion. Visible so the caller can retry with more tokens.
+        "length" | "max_tokens" => Ok(StopReason::MaxTokens),
+        // Policy refusal. Surface as a hard error rather than silently
+        // converting to EndTurn — the user needs to see that their request
+        // was blocked upstream, not stall on an empty response.
+        "content_filter" => Err(ProviderError::BadRequest(
+            "provider refused: content_filter".into(),
+        )),
+        other => {
+            tracing::warn!(
+                target: "harness_provider::openai",
+                finish_reason = other,
+                "unknown finish_reason; defaulting to EndTurn so the loop can exit"
+            );
+            Ok(StopReason::EndTurn)
+        }
     }
 }
 
@@ -761,9 +835,14 @@ struct ChunkDelta {
 
 #[derive(Debug, Deserialize)]
 struct ChunkToolCall {
-    /// Position within the assistant's tool_calls array. Required — this is
-    /// how fragments from different calls are demuxed.
-    index: usize,
+    /// Position within the assistant's tool_calls array. OpenAI reference
+    /// servers always emit this; Ollama and llama.cpp `--jinja` templates
+    /// sometimes omit it. When missing, `translate_chunk` falls back to the
+    /// tool_call's position in the enclosing delta array — lossy for
+    /// multi-call interleaving, but keeps the single-call case (the common
+    /// one on small local models) working.
+    #[serde(default)]
+    index: Option<usize>,
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -810,13 +889,15 @@ mod tests {
     use harness_proto::{ContentBlock, Message, Role};
 
     fn req<'a>(
-        model: &'a str,
+        _model: &'a str,
         system: &'a str,
         messages: &'a [Message],
         tools: &'a [ToolSpec],
     ) -> StreamRequest<'a> {
+        // `model` is intentionally unused: `StreamRequest` no longer carries
+        // a model field — the concrete provider holds it. We keep the arg to
+        // minimise churn in the test call sites.
         StreamRequest {
-            model,
             system,
             messages,
             tools,
@@ -1098,6 +1179,198 @@ mod tests {
         assert_eq!(stop_reason, Some(Some(StopReason::MaxTokens)));
     }
 
+    #[tokio::test]
+    async fn finish_reason_length_warns() {
+        // `length` is a truncation signal. It must still reach the engine as
+        // MaxTokens (not silently dropped to EndTurn) so the loop can decide
+        // whether to retry with a larger budget.
+        let body = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let evs: Vec<_> = collect(stream_of(vec![body.as_bytes()]))
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        // MaxTokens survives end-to-end — asserted here because a regression
+        // that silently remapped it to EndTurn would be invisible at runtime.
+        let sr = evs
+            .iter()
+            .find_map(|ev| match ev {
+                StreamEvent::MessageDelta { stop_reason, .. } => *stop_reason,
+                _ => None,
+            })
+            .expect("MessageDelta with stop_reason expected");
+        assert_eq!(sr, StopReason::MaxTokens);
+    }
+
+    #[tokio::test]
+    async fn finish_reason_content_filter_errors() {
+        // content_filter must surface as a hard error. Silently mapping to
+        // EndTurn would leave the user staring at an empty-looking response
+        // without knowing their prompt was refused.
+        let body = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":\"content_filter\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let errs: Vec<_> = collect(stream_of(vec![body.as_bytes()]))
+            .await
+            .into_iter()
+            .filter_map(Result::err)
+            .collect();
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, ProviderError::BadRequest(m) if m.contains("content_filter"))),
+            "expected BadRequest carrying content_filter, got {errs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_reason_eos_maps_to_end_turn() {
+        // llama.cpp and a few MLX shims emit `"eos"` instead of `"stop"`.
+        let body = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"eos\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let evs: Vec<_> = collect(stream_of(vec![body.as_bytes()]))
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        let sr = evs.iter().find_map(|ev| match ev {
+            StreamEvent::MessageDelta { stop_reason, .. } => *stop_reason,
+            _ => None,
+        });
+        assert_eq!(sr, Some(StopReason::EndTurn));
+    }
+
+    #[tokio::test]
+    async fn finish_reason_unknown_warns_but_ends() {
+        // Unknown values fall through to EndTurn — keep the loop unstuck.
+        let body = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"weird_unknown_value\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let evs: Vec<_> = collect(stream_of(vec![body.as_bytes()]))
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        let sr = evs.iter().find_map(|ev| match ev {
+            StreamEvent::MessageDelta { stop_reason, .. } => *stop_reason,
+            _ => None,
+        });
+        assert_eq!(sr, Some(StopReason::EndTurn));
+    }
+
+    #[test]
+    fn max_tokens_respects_request() {
+        // Non-zero request value passes through verbatim — the engine's
+        // caller-supplied budget is authoritative.
+        let msgs = vec![Message::user("hi")];
+        let body = build_request_body(
+            "gpt-4o",
+            &StreamRequest {
+                system: "",
+                messages: &msgs,
+                tools: &[],
+                max_tokens: 4096,
+            },
+        );
+        assert_eq!(body["max_tokens"], 4096);
+    }
+
+    #[test]
+    fn max_tokens_defaults_to_conservative_value_when_zero() {
+        // Zero (or missing) falls back to DEFAULT_MAX_TOKENS. The literal
+        // value matters — it must be small enough to fit Ollama's default
+        // 4096-token context window even with prompt tokens stacked on top.
+        let msgs = vec![Message::user("hi")];
+        let body = build_request_body(
+            "gpt-4o",
+            &StreamRequest {
+                system: "",
+                messages: &msgs,
+                tools: &[],
+                max_tokens: 0,
+            },
+        );
+        assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
+        // Compile-time invariant — DEFAULT_MAX_TOKENS must fit inside
+        // Ollama's stock num_ctx (4096) even with some prompt budget on top.
+        // A const_assert keeps this cheap; runtime check would be optimized
+        // out by the compiler (clippy flags it) since both sides are consts.
+        const _: () = assert!(DEFAULT_MAX_TOKENS <= 4096);
+    }
+
+    #[tokio::test]
+    async fn tool_call_index_optional_deserializes() {
+        // Ollama and some llama.cpp `--jinja` templates omit
+        // `tool_calls[i].index`. Our deserializer must tolerate that and the
+        // stream must still translate into a well-formed ToolUse block. Using
+        // two separate chunks without `index` — the fallback uses each
+        // chunk's array-position (0), so both fragments attach to the same
+        // tool_call which is the correct behavior for a single call.
+        let body = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_no_idx\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"f\\\":1}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let evs: Vec<_> = collect(stream_of(vec![body.as_bytes()]))
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        // ContentBlockStart with id+name must have been emitted.
+        let saw_start = evs.iter().any(|e| {
+            matches!(
+                e,
+                StreamEvent::ContentBlockStart {
+                    block: ContentBlockHeader::ToolUse { id, name },
+                    ..
+                } if id == "call_no_idx" && name == "Read"
+            )
+        });
+        assert!(saw_start, "missing ToolUse ContentBlockStart");
+        // And the argument JSON must have been forwarded.
+        let mut args = Vec::<u8>::new();
+        for ev in &evs {
+            if let StreamEvent::ContentBlockDelta {
+                delta: ContentDelta::InputJson(b),
+                ..
+            } = ev
+            {
+                args.extend_from_slice(b);
+            }
+        }
+        assert_eq!(std::str::from_utf8(&args).unwrap(), "{\"f\":1}");
+        // ...and the stop_reason maps correctly.
+        let sr = evs.iter().find_map(|ev| match ev {
+            StreamEvent::MessageDelta { stop_reason, .. } => *stop_reason,
+            _ => None,
+        });
+        assert_eq!(sr, Some(StopReason::ToolUse));
+    }
+
+    #[test]
+    fn chunk_tool_call_deserializes_without_index_field() {
+        // Belt-and-suspenders: the raw serde path itself must accept
+        // tool_calls entries missing `index` without erroring. Guards against
+        // a future change that reverts `index` back to a required field.
+        let json = r#"{"id":"c1","choices":[{"delta":{"tool_calls":[
+            {"id":"t1","function":{"name":"X","arguments":"{}"}}
+        ]},"finish_reason":null}]}"#;
+        let chunk: ChatCompletionChunk = serde_json::from_str(json).expect("must deserialize");
+        let tc = &chunk.choices[0].delta.tool_calls[0];
+        assert!(tc.index.is_none());
+        assert_eq!(tc.id.as_deref(), Some("t1"));
+    }
+
     #[test]
     fn http_errors_classified() {
         assert!(matches!(
@@ -1293,7 +1566,6 @@ mod tests {
 
             let msgs = vec![Message::user("hi")];
             let req = StreamRequest {
-                model: "qwen2.5",
                 system: "",
                 messages: &msgs,
                 tools: &[],
@@ -1352,7 +1624,6 @@ mod tests {
             )
             .unwrap();
             let req = StreamRequest {
-                model: "m",
                 system: "",
                 messages: &[],
                 tools: &[],

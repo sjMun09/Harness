@@ -17,12 +17,36 @@ use tokio_util::sync::CancellationToken;
 
 pub use crate::hooks::HookDispatcher;
 
+/// User answer to an interactive permission prompt. PLAN §5.8.
+/// The CLI binds `AskPrompt` to an implementation that reads stdin; headless
+/// runs leave `ToolCtx::ask_prompt` as `None` and fall through to an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskAnswer {
+    Yes,
+    No,
+    Always,
+    DontAsk,
+}
+
+/// Hook consulted when permission evaluation returns `Decision::Ask`. The
+/// engine calls `ask(tool, input)` and interprets the answer. Implementations
+/// live in the CLI (TTY prompt) or test shims (canned answers).
+pub trait AskPrompt: Send + Sync + std::fmt::Debug {
+    fn ask(&self, tool: &str, input: &Value) -> AskAnswer;
+}
+
 /// A tool the model can call. Advertised to the provider via `schema()`,
 /// dispatched by the turn loop per tool_use block.
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Stable identifier. Matches wire `tool_use.name`.
     fn name(&self) -> &str;
+
+    /// One-sentence description shown to the model alongside the schema.
+    /// Required — every Tool impl must provide something concrete so the model
+    /// understands when to pick this tool over a sibling. Keep to a single
+    /// short English sentence; detailed usage goes in the JSON Schema docs.
+    fn description(&self) -> &'static str;
 
     /// JSON Schema of the `input` object. Sent verbatim to the provider.
     fn schema(&self) -> Value;
@@ -95,6 +119,9 @@ pub struct ToolCtx {
     /// binaries that opt out. Subagents inherit the parent's handle so every
     /// write lands in a single revert point.
     pub tx: crate::tx::OptTx,
+    /// Optional interactive prompt for `Decision::Ask`. `None` for tests and
+    /// headless runs — the engine surfaces Ask as a tool error when unset.
+    pub ask_prompt: Option<std::sync::Arc<dyn AskPrompt>>,
 }
 
 impl ToolCtx {

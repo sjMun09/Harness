@@ -74,6 +74,10 @@ impl Tool for TestTool {
         "Test"
     }
 
+    fn description(&self) -> &'static str {
+        "Run a project's test suite (cargo/maven/pytest/vitest/jest/playwright or a custom command) and return a failure-focused summary."
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -417,6 +421,7 @@ mod tests {
             subagent: None,
             depth: 0,
             tx: None,
+            ask_prompt: None,
         }
     }
 

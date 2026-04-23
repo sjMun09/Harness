@@ -80,6 +80,48 @@ pub const DEFAULT_ENV_ALLOW: &[&str] = &[
 pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
 pub const MAX_TIMEOUT_SECS: u64 = 600;
 
+/// Env-var escape hatch that opts a session into `mode: "shell"` execution.
+/// Default-deny: shell mode is a pipe/redirect/compound-command superset of
+/// the argv mode that shlex-prefix `Bash(...)` rules were designed for — an
+/// operator who writes `Bash(git status)` expecting single-command argv
+/// dispatch would be surprised to see `git status; rm -rf ~` fall into the
+/// same rule bucket.
+///
+/// Shell-mode commands bypass the argv-level shlex decomposition that
+/// permission rules (harness-perm) rely on for prefix matching. Until the
+/// CLI settings schema grows a first-class `bash.allow_shell_mode` toggle,
+/// callers that genuinely need shell composition set this env var to `1`
+/// (or `true`).
+///
+/// TODO(settings): thread a `bash.allow_shell_mode: bool` through
+/// `harness-core::config::Settings` — would let operators pin this per repo
+/// via `.claude/settings.json` rather than per-shell env. Blocked on
+/// Workstream B / harness-core scope.
+pub const SHELL_MODE_ENV_VAR: &str = "HARNESS_BASH_ALLOW_SHELL_MODE";
+
+/// Check the env-var opt-in. Truthy values: `1`, `true`, `yes`, `on`
+/// (case-insensitive). Anything else — empty, unset, `0`, `false` — is deny.
+fn shell_mode_allowed() -> bool {
+    std::env::var(SHELL_MODE_ENV_VAR)
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn shell_mode_denied_error() -> ToolError {
+    ToolError::Validation(format!(
+        "Bash `mode: \"shell\"` is disabled. Shell mode (sh -c) bypasses the \
+         shlex-prefix permission rules used by `Bash(<prefix>)` — a wildcard \
+         `Bash(*)` allow would otherwise cover arbitrary compound commands \
+         (`rm -rf ~`, shell redirects, etc.). Re-run with \
+         `{SHELL_MODE_ENV_VAR}=1` to opt in, or rewrite the command in argv \
+         mode (the default)."
+    ))
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum BashMode {
@@ -110,6 +152,10 @@ pub struct BashTool;
 impl Tool for BashTool {
     fn name(&self) -> &str {
         "Bash"
+    }
+
+    fn description(&self) -> &'static str {
+        "Execute a shell command (argv or shell mode) with a timeout; supports background jobs tracked by shell id."
     }
 
     fn schema(&self) -> Value {
@@ -147,6 +193,12 @@ impl Tool for BashTool {
 
     async fn call(&self, input: Value, ctx: ToolCtx) -> Result<ToolOutput, ToolError> {
         let bi: BashInput = parse_input(input, "Bash")?;
+
+        // Shell-mode gate: block *before* dispatching to spawn_background so
+        // the deny message is uniform for fg + bg callers.
+        if matches!(bi.mode, BashMode::Shell) && !shell_mode_allowed() {
+            return Err(shell_mode_denied_error());
+        }
 
         if bi.run_in_background {
             return spawn_background(bi, ctx).await;
@@ -354,6 +406,39 @@ mod tests {
             subagent: None,
             depth: 0,
             tx: None,
+            ask_prompt: None,
+        }
+    }
+
+    /// Every existing shell-mode test relies on `HARNESS_BASH_ALLOW_SHELL_MODE`.
+    /// Tests run in parallel by default, so share a mutex so we don't
+    /// race with the opt-out test below that wants the var *unset*.
+    static SHELL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct ShellEnvGuard {
+        prev: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl ShellEnvGuard {
+        fn allow() -> Self {
+            let lock = SHELL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os(SHELL_MODE_ENV_VAR);
+            std::env::set_var(SHELL_MODE_ENV_VAR, "1");
+            Self { prev, _lock: lock }
+        }
+        fn deny() -> Self {
+            let lock = SHELL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os(SHELL_MODE_ENV_VAR);
+            std::env::remove_var(SHELL_MODE_ENV_VAR);
+            Self { prev, _lock: lock }
+        }
+    }
+    impl Drop for ShellEnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(SHELL_MODE_ENV_VAR, v),
+                None => std::env::remove_var(SHELL_MODE_ENV_VAR),
+            }
         }
     }
 
@@ -388,6 +473,7 @@ mod tests {
 
     #[tokio::test]
     async fn env_is_scrubbed() {
+        let _shell = ShellEnvGuard::allow();
         std::env::set_var("SECRET_XYZ", "leak-me");
         let dir = tempdir().unwrap();
         let out = BashTool
@@ -410,6 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_fires_for_slow_command() {
+        let _shell = ShellEnvGuard::allow();
         let dir = tempdir().unwrap();
         let err = BashTool
             .call(
@@ -440,6 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_short_circuits() {
+        let _shell = ShellEnvGuard::allow();
         let dir = tempdir().unwrap();
         let ctx_ = ctx(dir.path());
         let token = ctx_.cancel.clone();
@@ -476,6 +564,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bg_spawn_returns_shell_id() {
+        let _shell = ShellEnvGuard::allow();
         let dir = tempdir().unwrap();
         let started = std::time::Instant::now();
         let out = BashTool
@@ -503,6 +592,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bash_output_drains_new_output() {
+        let _shell = ShellEnvGuard::allow();
         let dir = tempdir().unwrap();
         let out = BashTool
             .call(
@@ -542,6 +632,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bash_output_filter_regex() {
+        let _shell = ShellEnvGuard::allow();
         let dir = tempdir().unwrap();
         let out = BashTool
             .call(
@@ -576,6 +667,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn kill_shell_terminates_child() {
+        let _shell = ShellEnvGuard::allow();
         let dir = tempdir().unwrap();
         let out = BashTool
             .call(
@@ -619,6 +711,89 @@ mod tests {
             let r = kill(Pid::from_raw(pid), None);
             assert!(r.is_err(), "pid {pid} still alive after KillShell");
         }
+    }
+
+    /// Default state: shell mode must be rejected without the env opt-in,
+    /// even when the command itself is harmless. The error must be
+    /// `Validation` so hooks / logs can distinguish a denied invocation
+    /// from an IO / timeout failure.
+    #[tokio::test]
+    async fn shell_mode_denied_by_default() {
+        let _shell = ShellEnvGuard::deny();
+        let dir = tempdir().unwrap();
+        let err = BashTool
+            .call(
+                serde_json::json!({
+                    "command": "echo hi",
+                    "mode": "shell",
+                }),
+                ctx(dir.path()),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::Validation(msg) => {
+                assert!(
+                    msg.contains(SHELL_MODE_ENV_VAR),
+                    "error should reference the env var: {msg}"
+                );
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    /// The `run_in_background` path must apply the same gate — operators
+    /// can't sidestep the deny by flipping the background flag.
+    #[tokio::test]
+    async fn shell_mode_denied_in_background_too() {
+        let _shell = ShellEnvGuard::deny();
+        let dir = tempdir().unwrap();
+        let err = BashTool
+            .call(
+                serde_json::json!({
+                    "command": "echo hi",
+                    "mode": "shell",
+                    "run_in_background": true,
+                }),
+                ctx(dir.path()),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn shell_mode_allowed_with_env() {
+        let _shell = ShellEnvGuard::allow();
+        let dir = tempdir().unwrap();
+        let out = BashTool
+            .call(
+                serde_json::json!({
+                    "command": "echo opted-in",
+                    "mode": "shell",
+                }),
+                ctx(dir.path()),
+            )
+            .await
+            .expect("shell mode allowed with env var");
+        assert!(out.summary.contains("opted-in"));
+        assert!(out.summary.contains("exit 0"));
+    }
+
+    /// Argv mode is the default and must keep working with the env var unset —
+    /// the gate is specifically for `mode: "shell"` invocations.
+    #[tokio::test]
+    async fn argv_mode_unaffected_by_shell_gate() {
+        let _shell = ShellEnvGuard::deny();
+        let dir = tempdir().unwrap();
+        let out = BashTool
+            .call(
+                serde_json::json!({ "command": "echo argv-ok" }),
+                ctx(dir.path()),
+            )
+            .await
+            .expect("argv mode must work with shell gate closed");
+        assert!(out.summary.contains("argv-ok"));
     }
 
     #[cfg(unix)]

@@ -272,7 +272,9 @@ fn map_raw(raw: RawEvent) -> StreamEvent {
         },
         RawEvent::MessageStop => StreamEvent::MessageStop,
         RawEvent::Ping => StreamEvent::Ping,
-        RawEvent::Error { error: _ } => StreamEvent::Ping, // placeholder — iter 1: propagate error
+        RawEvent::Error { error } => {
+            StreamEvent::Error(format!("anthropic {}: {}", error.kind, error.message))
+        }
     }
 }
 
@@ -347,5 +349,28 @@ mod tests {
         assert_eq!(u.output_tokens, 3);
         assert_eq!(u.cache_creation_input_tokens, 0);
         assert_eq!(u.cache_read_input_tokens, 0);
+    }
+
+    /// An Anthropic SSE `event: error` frame must surface as
+    /// `StreamEvent::Error(msg)` carrying the error kind + message. Previously
+    /// this was mapped to `Ping`, causing the engine to hang waiting for a
+    /// `MessageStop` that would never arrive.
+    #[test]
+    fn error_event_propagates_as_stream_error() {
+        let raw = r#"{
+            "type": "error",
+            "error": {
+                "type": "overloaded_error",
+                "message": "Overloaded"
+            }
+        }"#;
+        let evt: RawEvent = serde_json::from_str(raw).expect("parse error event");
+        match map_raw(evt) {
+            StreamEvent::Error(msg) => {
+                assert!(msg.contains("overloaded_error"), "got: {msg}");
+                assert!(msg.contains("Overloaded"), "got: {msg}");
+            }
+            other => panic!("expected StreamEvent::Error, got {other:?}"),
+        }
     }
 }

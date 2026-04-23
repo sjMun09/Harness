@@ -232,7 +232,6 @@ mod tests {
 
     fn empty_req() -> StreamRequest<'static> {
         StreamRequest {
-            model: "",
             system: "",
             messages: &[],
             tools: &[],

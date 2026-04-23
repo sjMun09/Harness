@@ -50,6 +50,10 @@ impl Tool for MyBatisDynamicParserTool {
         "MyBatisDynamicParser"
     }
 
+    fn description(&self) -> &'static str {
+        "Parse a MyBatis mapper XML, enumerate each statement's dynamic-SQL branches, and optionally diff against a second file."
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

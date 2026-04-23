@@ -32,6 +32,10 @@ impl Tool for GlobTool {
         "Glob"
     }
 
+    fn description(&self) -> &'static str {
+        "List filesystem paths matching a glob pattern (e.g. `src/**/*.rs`), sorted by modification time."
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -186,6 +190,7 @@ mod tests {
             subagent: None,
             depth: 0,
             tx: None,
+            ask_prompt: None,
         }
     }
 

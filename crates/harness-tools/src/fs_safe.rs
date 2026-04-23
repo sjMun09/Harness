@@ -28,6 +28,32 @@ use thiserror::Error;
 pub const DENY_PATH_PREFIXES: &[&str] =
     &["/proc/", "/dev/tcp", "/dev/fd/", "\\\\?\\", "\\\\.\\pipe\\"];
 
+/// Sensitive paths under `$HOME` that must NEVER be readable/writable by the
+/// tool sandbox, regardless of whether the effective cwd is the home dir. A
+/// user running `cd ~ && harness ask ...` would otherwise see absolute paths
+/// like `~/.aws/credentials` canonicalize *inside* the cwd root and slip
+/// through the containment check.
+///
+/// Entries are `$HOME`-relative. Each prefix matches any path underneath it
+/// (e.g. `.ssh/` matches `.ssh/id_rsa`, `.ssh/config`, etc.) after
+/// `.`/`..` normalization and canonicalization. Standalone files
+/// (e.g. `.netrc`) match exactly that path and nothing below.
+///
+/// Scope: files containing credentials, auth tokens, cloud/CI keys, or
+/// package-registry creds. Not exhaustive — intentionally conservative,
+/// false positives (user would rather not grant) are acceptable here.
+pub const HOME_SENSITIVE_PREFIXES: &[&str] = &[
+    ".aws/",       // AWS shared credentials / config
+    ".ssh/",       // SSH keys, known_hosts (keys are signal)
+    ".config/gh/", // GitHub CLI OAuth tokens
+    ".kube/",      // kubeconfig + service-account tokens
+    ".gnupg/",     // GPG secret keyrings
+];
+
+/// Sensitive dotfiles directly under `$HOME` — matched as exact path (not
+/// prefix, since these are files, not dirs).
+pub const HOME_SENSITIVE_FILES: &[&str] = &[".netrc", ".pgpass", ".npmrc", ".pypirc"];
+
 #[derive(Debug, Error)]
 pub enum PathError {
     #[error("path escapes root: {0}")]
@@ -202,6 +228,7 @@ pub fn check_deny_list(p: &Path) -> Result<(), PathError> {
             return Err(PathError::Denied(p.to_path_buf()));
         }
     }
+    check_home_sensitive(p)?;
     // NTFS ADS — component body contains `:`. Unix legit paths don't.
     if cfg!(windows) {
         for comp in p.components() {
@@ -213,6 +240,63 @@ pub fn check_deny_list(p: &Path) -> Result<(), PathError> {
         }
     }
     Ok(())
+}
+
+/// Reject absolute paths that resolve into well-known credential locations
+/// under `$HOME`. The string-level canonicalization pass can't protect these
+/// when the effective cwd *is* `$HOME` — a model-issued `Read /Users/mun/.aws/credentials`
+/// canonicalizes inside the cwd-root and passes containment. This guard runs
+/// unconditionally after the canonical prefix check.
+///
+/// Best-effort: silently skipped when `$HOME` is unset or non-canonical (very
+/// unusual — tests use `env::set_var("HOME", ...)` to simulate).
+fn check_home_sensitive(p: &Path) -> Result<(), PathError> {
+    let Some(home) = resolve_home() else {
+        return Ok(());
+    };
+    // Canonicalize `$HOME` where possible so the comparison tolerates symlinks
+    // like `/var` → `/private/var` on macOS. When canonicalize fails (e.g.
+    // custom test HOME that doesn't exist) fall back to the raw string.
+    let home_canonical = home.canonicalize().unwrap_or(home);
+    let Ok(rel) = p.strip_prefix(&home_canonical) else {
+        return Ok(());
+    };
+    let rel_str = rel.to_string_lossy();
+    for prefix in HOME_SENSITIVE_PREFIXES {
+        // Match the directory itself (`rel == ".aws"`) or anything beneath it
+        // (`rel == ".aws/credentials"`). A trailing `/` in the constant forces
+        // boundary alignment so `.awsfoo` doesn't match `.aws/`.
+        let stripped = prefix.trim_end_matches('/');
+        if rel_str == stripped || rel_str.starts_with(prefix) {
+            return Err(PathError::Denied(p.to_path_buf()));
+        }
+    }
+    for file in HOME_SENSITIVE_FILES {
+        if rel_str == *file {
+            return Err(PathError::Denied(p.to_path_buf()));
+        }
+    }
+    Ok(())
+}
+
+/// Resolve `$HOME` for sensitive-path checks. Prefers the env var (standard
+/// across Unix; Windows systems set it via shell init too), falls back to
+/// `USERPROFILE` on Windows.
+fn resolve_home() -> Option<PathBuf> {
+    if let Ok(h) = std::env::var("HOME") {
+        if !h.is_empty() {
+            return Some(PathBuf::from(h));
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(h) = std::env::var("USERPROFILE") {
+            if !h.is_empty() {
+                return Some(PathBuf::from(h));
+            }
+        }
+    }
+    None
 }
 
 /// Logical normalize — strips `.` and resolves `..` without touching the fs.
@@ -333,6 +417,135 @@ mod tests {
         // Synthetic path — don't hit real /proc on macOS.
         let err = check_deny_list(Path::new("/proc/self/mem")).unwrap_err();
         assert!(matches!(err, PathError::Denied(_)));
+    }
+
+    /// Serialize tests that mutate `$HOME` — rustc runs unit tests in parallel
+    /// on a single process by default, and we cannot trust other tests to leave
+    /// the env var alone. `Mutex<()>` around the env swap is the standard dodge.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Guard that restores `$HOME` on drop, even if the test panics.
+    struct HomeGuard {
+        prev: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl HomeGuard {
+        fn set(new_home: &Path) -> Self {
+            let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("HOME");
+            std::env::set_var("HOME", new_home);
+            Self { prev, _lock: lock }
+        }
+    }
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_sensitive_aws_dir_blocked_under_fake_home() {
+        let fake_home = tempdir().unwrap();
+        let aws = fake_home.path().join(".aws");
+        std::fs::create_dir_all(&aws).unwrap();
+        std::fs::write(
+            aws.join("credentials"),
+            "[default]\naws_access_key_id=AKIAx",
+        )
+        .unwrap();
+
+        let _g = HomeGuard::set(fake_home.path());
+
+        // Effective cwd is $HOME — this is the bug scenario from the review.
+        let err = canonicalize_within(fake_home.path(), Path::new(".aws/credentials")).unwrap_err();
+        assert!(
+            matches!(err, PathError::Denied(_)),
+            "expected Denied, got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_sensitive_absolute_path_blocked_even_in_home_cwd() {
+        let fake_home = tempdir().unwrap();
+        let ssh = fake_home.path().join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(ssh.join("id_rsa"), "-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
+
+        let _g = HomeGuard::set(fake_home.path());
+        let absolute = ssh.join("id_rsa");
+
+        let err = canonicalize_within(fake_home.path(), &absolute).unwrap_err();
+        assert!(
+            matches!(err, PathError::Denied(_)),
+            "expected Denied, got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_sensitive_dotfiles_blocked() {
+        for leaf in &[".netrc", ".pgpass", ".npmrc", ".pypirc"] {
+            let fake_home = tempdir().unwrap();
+            let f = fake_home.path().join(leaf);
+            std::fs::write(&f, "secret").unwrap();
+            let _g = HomeGuard::set(fake_home.path());
+            let err = canonicalize_within(fake_home.path(), Path::new(leaf)).unwrap_err();
+            assert!(
+                matches!(err, PathError::Denied(_)),
+                "expected Denied for {leaf}, got {err:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_sensitive_directory_itself_blocked() {
+        let fake_home = tempdir().unwrap();
+        let kube = fake_home.path().join(".kube");
+        std::fs::create_dir_all(&kube).unwrap();
+
+        let _g = HomeGuard::set(fake_home.path());
+        let err = canonicalize_within(fake_home.path(), Path::new(".kube")).unwrap_err();
+        assert!(
+            matches!(err, PathError::Denied(_)),
+            "expected Denied, got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_non_sensitive_path_still_allowed() {
+        let fake_home = tempdir().unwrap();
+        let project = fake_home.path().join("projects").join("mine");
+        std::fs::create_dir_all(&project).unwrap();
+        let f = project.join("notes.md");
+        std::fs::write(&f, "ok").unwrap();
+
+        let _g = HomeGuard::set(fake_home.path());
+        let out = canonicalize_within(fake_home.path(), &f).unwrap();
+        assert_eq!(out, f.canonicalize().unwrap());
+    }
+
+    /// Similar-but-not-matching names must NOT collide with the sensitive list
+    /// (e.g. `.awsfoo/` must be allowed). Guards against boundary-less prefix
+    /// bugs.
+    #[cfg(unix)]
+    #[test]
+    fn home_similar_names_not_blocked() {
+        let fake_home = tempdir().unwrap();
+        let decoy = fake_home.path().join(".awsfoo");
+        std::fs::create_dir_all(&decoy).unwrap();
+        let f = decoy.join("notes.md");
+        std::fs::write(&f, "ok").unwrap();
+
+        let _g = HomeGuard::set(fake_home.path());
+        let out = canonicalize_within(fake_home.path(), Path::new(".awsfoo/notes.md")).unwrap();
+        assert_eq!(out, f.canonicalize().unwrap());
     }
 
     #[cfg(unix)]

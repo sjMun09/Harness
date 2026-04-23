@@ -34,6 +34,10 @@ impl Tool for WriteTool {
         "Write"
     }
 
+    fn description(&self) -> &'static str {
+        "Write UTF-8 content to a file path, creating parent directories and replacing any existing file."
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -193,6 +197,7 @@ mod tests {
             subagent: None,
             depth: 0,
             tx: None,
+            ask_prompt: None,
         }
     }
 

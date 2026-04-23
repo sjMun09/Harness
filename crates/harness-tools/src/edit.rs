@@ -32,6 +32,10 @@ impl Tool for EditTool {
         "Edit"
     }
 
+    fn description(&self) -> &'static str {
+        "Replace a unique exact string match in a file; requires the caller to have read the file first."
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -196,6 +200,7 @@ mod tests {
             subagent: None,
             depth: 0,
             tx: None,
+            ask_prompt: None,
         }
     }
 

@@ -69,6 +69,10 @@ impl Tool for DiffExecTool {
         "DiffExec"
     }
 
+    fn description(&self) -> &'static str {
+        "Diff two rendered files (text or SQL-normalized) and emit a unified diff plus summary; use to verify refactors are formatting-only."
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -456,6 +460,7 @@ mod tests {
             subagent: None,
             depth: 0,
             tx: None,
+            ask_prompt: None,
         }
     }
 

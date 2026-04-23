@@ -57,6 +57,10 @@ impl Tool for GrepTool {
         "Grep"
     }
 
+    fn description(&self) -> &'static str {
+        "Search file contents with a regex (ripgrep), returning matching lines, file lists, or counts."
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -269,6 +273,7 @@ mod tests {
             subagent: None,
             depth: 0,
             tx: None,
+            ask_prompt: None,
         }
     }
 

@@ -103,7 +103,11 @@ pub fn skip_trust_check() {
 /// Public entry: ensure the given `cwd` has been user-approved. See module
 /// docs for semantics. On first acceptance the store is written atomically
 /// with 0600 perms (Unix).
-pub fn ensure_trusted(cwd: &Path) -> anyhow::Result<()> {
+///
+/// Returns the **canonicalized** path. Callers should use this as the
+/// effective cwd so later tool calls agree on the resolved symlink chain
+/// (avoids a TOCTOU hole between the trust check and `ctx.cwd` use).
+pub fn ensure_trusted(cwd: &Path) -> anyhow::Result<PathBuf> {
     let is_tty = io::stdin().is_terminal();
     let store_path = trust_store_path();
     ensure_trusted_inner(cwd, &store_path, is_tty, &mut io::stderr())
@@ -116,13 +120,13 @@ fn ensure_trusted_inner<W: Write>(
     store_path: &Path,
     is_tty: bool,
     ui: &mut W,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PathBuf> {
     let (canonical, hash) = hash_cwd(cwd)?;
 
     let mut store = load_store(store_path)?;
     if store.trusted.contains_key(&hash) {
         tracing::debug!(path = %canonical.display(), "cwd already trusted");
-        return Ok(());
+        return Ok(canonical);
     }
 
     if !is_tty {
@@ -164,7 +168,7 @@ fn ensure_trusted_inner<W: Write>(
     store.trusted.insert(hash, entry);
     save_store(store_path, &store)?;
     tracing::info!(path = %canonical.display(), "cwd trusted");
-    Ok(())
+    Ok(canonical)
 }
 
 /// Read the store if it exists; treat missing / empty / malformed (but with
@@ -278,8 +282,10 @@ mod tests {
         // ensure_trusted_inner with is_tty=false should still succeed because
         // the entry is already present.
         let mut ui = Vec::<u8>::new();
-        ensure_trusted_inner(cwd, &store_path, false, &mut ui).unwrap();
+        let returned = ensure_trusted_inner(cwd, &store_path, false, &mut ui).unwrap();
         assert!(ui.is_empty(), "no prompt should have been emitted");
+        // The returned path is canonicalized.
+        assert_eq!(returned, std::fs::canonicalize(cwd).unwrap());
     }
 
     #[test]

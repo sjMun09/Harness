@@ -33,6 +33,10 @@ impl Tool for ReadTool {
         "Read"
     }
 
+    fn description(&self) -> &'static str {
+        "Read a UTF-8 text file (with optional line offset/limit) and return the numbered contents."
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
@@ -161,6 +165,7 @@ mod tests {
             subagent: None,
             depth: 0,
             tx: None,
+            ask_prompt: None,
         }
     }
 

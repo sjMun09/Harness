@@ -920,6 +920,7 @@ dependencies = [
  "fs4",
  "harness-proto",
  "redb",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

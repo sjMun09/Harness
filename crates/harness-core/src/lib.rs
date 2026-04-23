@@ -25,6 +25,7 @@ pub use provider::{
     StreamRequest, ToolSpec,
 };
 pub use tool::{
-    HookDispatcher, OutputChunk, Preview, StreamKind, Tool, ToolCtx, ToolError, ToolOutput,
+    AskAnswer, AskPrompt, HookDispatcher, OutputChunk, Preview, StreamKind, Tool, ToolCtx,
+    ToolError, ToolOutput,
 };
 pub use turn::{BlockState, FinalizeError};
