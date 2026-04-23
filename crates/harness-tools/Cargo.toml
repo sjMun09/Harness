@@ -53,3 +53,10 @@ nix  = { workspace = true, features = ["fs", "process", "signal"] }
 # in `write.rs` and `openat2(RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH)` in
 # `fs_safe.rs`. See PLAN §3.1 / §8.2.
 rustix = { version = "0.38", features = ["fs"] }
+
+[dev-dependencies]
+# Integration tests in `tests/turnloop_e2e.rs` drive the full turn loop
+# (harness-core::run_turn) against real tools + a scripted FakeProvider.
+harness-testkit = { workspace = true }
+tokio           = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio-util      = { workspace = true }
