@@ -6,6 +6,7 @@
 mod config_import;
 mod doctor;
 mod line_mode;
+mod logfile;
 mod metrics;
 mod models;
 mod redact;
@@ -242,7 +243,24 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     // Order matters: `set_quiet` before the tracing init + any banner.
     set_quiet(cli.quiet);
-    init_tracing(cli.verbose, cli.quiet);
+
+    // Task 5: open the rolling log file up-front so every tracing event from
+    // the rest of `main` lands in it. Failure is non-fatal — the user still
+    // sees stderr, and we fall back to stderr-only.
+    let log_id = logfile::log_id();
+    let log_handle = match logfile::open(&log_id) {
+        Ok((h, p)) => {
+            cli_banner!("[log] {}", p.display());
+            Some(h)
+        }
+        Err(e) => {
+            // Use eprintln (not cli_banner) — even quiet users should see a
+            // log-file open failure, since it changes audit expectations.
+            eprintln!("[warn] could not open log file: {e}");
+            None
+        }
+    };
+    init_tracing(cli.verbose, cli.quiet, log_handle);
 
     // PLAN §8.2 loud-banner: `--dangerously-skip-permissions` MUST be visible
     // regardless of `--quiet` — operators silencing logs shouldn't also hide
@@ -384,27 +402,82 @@ async fn resolve_prompt(prompt: Option<String>, subcmd: &str) -> anyhow::Result<
     Ok(text)
 }
 
-fn init_tracing(verbose: bool, quiet: bool) {
+fn init_tracing(
+    verbose: bool,
+    quiet: bool,
+    log_handle: Option<Arc<std::sync::Mutex<std::fs::File>>>,
+) {
     if verbose {
         // PLAN §8.2: warn banner when DEBUG tracing is active.
         eprintln!(
             "[warn] verbose logging enabled — output may include secret values despite redaction. Do not share logs."
         );
     }
-    // `--verbose` wins over `--quiet` if both are passed. Default is `info`.
-    let default = if verbose {
-        "debug"
-    } else if quiet {
-        "warn"
-    } else {
-        "info"
-    };
+    // Default filter: `--verbose` wins over `--quiet` (quiet still gets
+    // `info` into the file; stderr is muted at the `MakeWriter` layer).
+    let default = if verbose { "debug" } else { "info" };
     let filter = EnvFilter::try_from_env("HARNESS_LOG").unwrap_or_else(|_| EnvFilter::new(default));
-    let redacting_writer = redact::RedactingMakeWriter::new(std::io::stderr);
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(redacting_writer)
-        .try_init();
+
+    // stderr arm (or sink when --quiet). We avoid `Box<dyn MakeWriter>`
+    // because `RedactingMakeWriter` is parameterised on the concrete type —
+    // using a manual enum keeps the generics tree small.
+    let stderr_writer = StderrOrSink { quiet };
+    let stderr_redacted = redact::RedactingMakeWriter::new(stderr_writer);
+
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
+    let _ = match log_handle {
+        Some(h) => {
+            let file = logfile::SharedFileMakeWriter::new(h);
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(stderr_redacted.and(file))
+                .try_init()
+        }
+        None => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(stderr_redacted)
+            .try_init(),
+    };
+}
+
+/// `MakeWriter` that emits to stderr, or swallows writes when `quiet` is
+/// set. The `Writer` associated type is an enum of the two concrete cases
+/// so we don't need a trait object.
+#[derive(Clone, Debug)]
+struct StderrOrSink {
+    quiet: bool,
+}
+
+/// Concrete writer enum — avoids `Box<dyn Write>` at the hot path.
+enum StderrOrSinkWriter {
+    Err(std::io::Stderr),
+    Sink(std::io::Sink),
+}
+
+impl std::io::Write for StderrOrSinkWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Err(w) => w.write(buf),
+            Self::Sink(w) => w.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Err(w) => w.flush(),
+            Self::Sink(w) => w.flush(),
+        }
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for StderrOrSink {
+    type Writer = StderrOrSinkWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        if self.quiet {
+            StderrOrSinkWriter::Sink(std::io::sink())
+        } else {
+            StderrOrSinkWriter::Err(std::io::stderr())
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
