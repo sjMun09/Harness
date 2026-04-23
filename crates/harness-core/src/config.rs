@@ -86,6 +86,13 @@ pub struct HarnessExt {
     pub subagent_bash_allowed: bool,
     #[serde(default)]
     pub plan_gate: PlanGate,
+    /// Opt-in: scrub secret-shaped substrings from outbound provider request
+    /// bodies (tool_result content + assistant text blocks). On-disk session
+    /// redaction (`harness_mem`) is always on; this extends the same scrubbing
+    /// to the wire. See `docs/security/egress-redaction.md`. Default: false.
+    /// Env overlay: `HARNESS_REDACT_EGRESS=1` / `=0`.
+    #[serde(default)]
+    pub redact_egress: bool,
 }
 
 impl Default for HarnessExt {
@@ -94,6 +101,7 @@ impl Default for HarnessExt {
             memory_paths: default_memory_paths(),
             subagent_bash_allowed: false,
             plan_gate: PlanGate::default(),
+            redact_egress: false,
         }
     }
 }
@@ -265,6 +273,7 @@ pub fn merge(mut base: Settings, overlay: Settings) -> Settings {
     }
     base.harness.subagent_bash_allowed = overlay.harness.subagent_bash_allowed;
     base.harness.plan_gate = overlay.harness.plan_gate;
+    base.harness.redact_egress = overlay.harness.redact_egress;
     base
 }
 
@@ -274,6 +283,21 @@ fn apply_env_overlay(s: &mut Settings) {
         if !m.trim().is_empty() {
             s.model = m;
         }
+    }
+    if let Ok(v) = std::env::var("HARNESS_REDACT_EGRESS") {
+        if let Some(b) = parse_env_bool(&v) {
+            s.harness.redact_egress = b;
+        }
+    }
+}
+
+/// Parse `HARNESS_*` bool env overlays. Accepts `1`/`0`, `true`/`false`,
+/// case-insensitive. Empty / unknown → `None` (leave setting untouched).
+fn parse_env_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -336,5 +360,37 @@ mod tests {
         apply_env_overlay(&mut s);
         assert_eq!(s.model, "claude-test-stub");
         std::env::remove_var("HARNESS_MODEL");
+    }
+
+    #[test]
+    fn redact_egress_defaults_off() {
+        let s = Settings::default();
+        assert!(!s.harness.redact_egress);
+    }
+
+    #[test]
+    fn env_overlay_toggles_redact_egress() {
+        // NOTE: scoped env mutation — these tests run in the same process, so
+        // always clean up. We avoid serial-test deps by using a unique key.
+        std::env::set_var("HARNESS_REDACT_EGRESS", "1");
+        let mut s = Settings::default();
+        apply_env_overlay(&mut s);
+        assert!(s.harness.redact_egress, "`=1` must enable");
+
+        std::env::set_var("HARNESS_REDACT_EGRESS", "false");
+        let mut s = Settings::default();
+        s.harness.redact_egress = true;
+        apply_env_overlay(&mut s);
+        assert!(!s.harness.redact_egress, "`=false` must disable");
+
+        std::env::set_var("HARNESS_REDACT_EGRESS", "nonsense");
+        let mut s = Settings::default();
+        s.harness.redact_egress = true;
+        apply_env_overlay(&mut s);
+        assert!(
+            s.harness.redact_egress,
+            "unparseable value must leave setting unchanged"
+        );
+        std::env::remove_var("HARNESS_REDACT_EGRESS");
     }
 }
