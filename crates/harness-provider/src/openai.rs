@@ -29,6 +29,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use url::Url;
 
+use crate::egress_redact::maybe_redact_messages;
+
 /// Hardcoded default when `--model` does not specify one. Overridable via
 /// `--model` / `HARNESS_MODEL` / `settings.json.model`.
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
@@ -52,6 +54,9 @@ pub struct OpenAIProvider {
     /// provider has stable behaviour across calls — changing the env mid-run
     /// does not take effect (matches how `OPENAI_API_KEY` is resolved).
     cfg: StreamCfg,
+    /// Opt-in egress redaction. See `crate::egress_redact` + the docs at
+    /// `docs/security/egress-redaction.md`. Default off.
+    redact_egress: bool,
 }
 
 /// Opt-in streaming tweaks. Today only carries the local-LLM text-based
@@ -140,6 +145,7 @@ impl OpenAIProvider {
             model,
             base_url,
             cfg,
+            redact_egress: false,
         })
     }
 
@@ -175,6 +181,7 @@ impl OpenAIProvider {
             model,
             base_url,
             cfg,
+            redact_egress: false,
         })
     }
 
@@ -182,6 +189,20 @@ impl OpenAIProvider {
     #[must_use]
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Enable egress-side secret redaction. Mirrors
+    /// `AnthropicProvider::with_redact_egress`. Default: off.
+    #[must_use]
+    pub fn with_redact_egress(mut self, enabled: bool) -> Self {
+        self.redact_egress = enabled;
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn redact_egress_enabled(&self) -> bool {
+        self.redact_egress
     }
 
     fn chat_completions_url(&self) -> Result<Url, ProviderError> {
@@ -248,7 +269,15 @@ fn resolve_api_key(base_url: &Url) -> Result<SecretString, ProviderError> {
 impl Provider for OpenAIProvider {
     async fn stream(&self, req: StreamRequest<'_>) -> Result<EventStream, ProviderError> {
         let url = self.chat_completions_url()?;
-        let body = build_request_body(&self.model, &req);
+        // Apply opt-in egress redaction BEFORE wire-format construction.
+        let scrubbed = maybe_redact_messages(req.messages, self.redact_egress);
+        let req_eff = StreamRequest {
+            system: req.system,
+            messages: &scrubbed,
+            tools: req.tools,
+            max_tokens: req.max_tokens,
+        };
+        let body = build_request_body(&self.model, &req_eff);
 
         let resp = self
             .client
@@ -2172,6 +2201,94 @@ mod tests {
                 Err(e) => e,
             };
             assert!(matches!(err, ProviderError::Auth(_)));
+        }
+
+        // --- Egress redaction ----------------------------------------------
+        //
+        // Confirms the security property from `docs/security/egress-redaction.md`:
+        // when `with_redact_egress(true)`, a fake secret embedded in a
+        // `ToolResult.content` must NOT appear in the outbound HTTP body that
+        // the provider sends upstream. With the flag off (the default), the
+        // raw secret goes through verbatim — this is the expected behavior
+        // so the model can thread tokens through tools. Both halves are
+        // asserted to make the contrast explicit and guard against drift.
+        const EGRESS_FAKE_SECRET: &str = "sk-ant-api03-abcdefghij1234567890XYZ";
+
+        fn tool_result_message() -> Message {
+            Message::user_tool_results(vec![ContentBlock::ToolResult {
+                tool_use_id: "tid".into(),
+                content: format!("printed {EGRESS_FAKE_SECRET} from env"),
+                is_error: false,
+                cache_control: None,
+            }])
+        }
+
+        async fn capture_request_body(provider: OpenAIProvider) -> String {
+            // Minimal well-formed SSE response so the client doesn't error.
+            let sse = b"data: [DONE]\n\n";
+            let captured = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<u8>::new()));
+            let port = serve_once(sse, captured.clone()).await;
+            // Rebind base URL to the mock port (with_config path).
+            let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+            let provider = OpenAIProvider::with_config(
+                provider.model().to_string(),
+                SecretString::from("local".to_string()),
+                url,
+            )
+            .unwrap()
+            .with_redact_egress(provider.redact_egress_enabled());
+
+            let msgs = vec![tool_result_message()];
+            let req = StreamRequest {
+                system: "",
+                messages: &msgs,
+                tools: &[],
+                max_tokens: 64,
+            };
+            let mut s = provider.stream(req).await.expect("stream open");
+            while s.next().await.is_some() {}
+            let bytes = captured.lock().await.clone();
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+
+        #[tokio::test]
+        async fn egress_redaction_off_by_default_leaks_secret_to_provider() {
+            // A built-via-with_config provider has `redact_egress: false`.
+            let p = OpenAIProvider::with_config(
+                "qwen2.5",
+                SecretString::from("local".to_string()),
+                Url::parse("http://127.0.0.1:1").unwrap(),
+            )
+            .unwrap();
+            assert!(!p.redact_egress_enabled(), "default must be off");
+
+            let req_str = capture_request_body(p).await;
+            assert!(
+                req_str.contains(EGRESS_FAKE_SECRET),
+                "default-off must pass raw tool_result content through to the provider"
+            );
+        }
+
+        #[tokio::test]
+        async fn egress_redaction_on_scrubs_secret_in_outbound_body() {
+            let p = OpenAIProvider::with_config(
+                "qwen2.5",
+                SecretString::from("local".to_string()),
+                Url::parse("http://127.0.0.1:1").unwrap(),
+            )
+            .unwrap()
+            .with_redact_egress(true);
+            assert!(p.redact_egress_enabled());
+
+            let req_str = capture_request_body(p).await;
+            assert!(
+                !req_str.contains(EGRESS_FAKE_SECRET),
+                "secret leaked into outbound HTTP body despite redact_egress=true: {req_str}"
+            );
+            assert!(
+                req_str.contains("[REDACTED:sk]"),
+                "missing redaction marker in outbound body: {req_str}"
+            );
         }
     }
 }

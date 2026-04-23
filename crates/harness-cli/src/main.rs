@@ -618,7 +618,12 @@ async fn run_session_core(run: SessionRun) -> anyhow::Result<SessionExit> {
         trust::ensure_trusted(&raw_cwd)?
     };
 
-    let provider: Arc<dyn Provider> = build_provider(&model, auth, base_url.as_deref())?;
+    let provider: Arc<dyn Provider> = build_provider(
+        &model,
+        auth,
+        base_url.as_deref(),
+        settings.harness.redact_egress,
+    )?;
 
     let tools = harness_tools::all_tools();
 
@@ -853,7 +858,12 @@ async fn run_session_tui(run: SessionRun) -> anyhow::Result<SessionExit> {
         trust::ensure_trusted(&raw_cwd)?
     };
 
-    let provider: Arc<dyn Provider> = build_provider(&model, auth, base_url.as_deref())?;
+    let provider: Arc<dyn Provider> = build_provider(
+        &model,
+        auth,
+        base_url.as_deref(),
+        settings.harness.redact_egress,
+    )?;
     let tools = harness_tools::all_tools();
 
     let permission = build_permission(&settings, dangerously_skip_permissions);
@@ -1036,6 +1046,7 @@ fn build_provider(
     model: &str,
     choice: AuthChoice,
     base_url: Option<&str>,
+    redact_egress: bool,
 ) -> anyhow::Result<Arc<dyn Provider>> {
     // Hard lock: `HARNESS_REFUSE_API_KEY=1` bans any metered (paid-API)
     // auth path — Anthropic API key, OpenAI, or custom base-url
@@ -1080,9 +1091,12 @@ fn build_provider(
         } else {
             cli_banner!("[auth] api-key (OPENAI_API_KEY) provider=openai");
         }
-        let p = OpenAIProvider::new_with_base_url(model_norm, base_url_parsed).context(
-            "build OpenAI provider — is OPENAI_API_KEY set? (not required for localhost)",
-        )?;
+        let p = OpenAIProvider::new_with_base_url(model_norm, base_url_parsed)
+            .context("build OpenAI provider — is OPENAI_API_KEY set? (not required for localhost)")?
+            .with_redact_egress(redact_egress);
+        if redact_egress {
+            cli_banner!("[security] egress redaction ON");
+        }
         return Ok(Arc::new(p));
     }
 
@@ -1173,6 +1187,10 @@ fn build_provider(
     if let Some(raw) = base_url {
         let url = url::Url::parse(raw).with_context(|| format!("parse --base-url value: {raw}"))?;
         p = p.with_base_url(url);
+    }
+    p = p.with_redact_egress(redact_egress);
+    if redact_egress {
+        cli_banner!("[security] egress redaction ON");
     }
     Ok(Arc::new(p))
 }

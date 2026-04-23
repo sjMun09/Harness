@@ -24,6 +24,7 @@ claude-code-oauth = []
 [dependencies]
 harness-proto = { workspace = true }
 harness-core  = { workspace = true }
+harness-mem   = { workspace = true }
 
 reqwest      = { workspace = true }
 tokio        = { workspace = true, features = ["rt", "macros", "sync", "time", "io-util"] }

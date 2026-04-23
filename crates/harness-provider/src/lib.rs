@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod anthropic;
+mod egress_redact;
 #[cfg(feature = "claude-code-oauth")]
 pub mod oauth;
 mod openai;

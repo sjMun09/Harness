@@ -21,6 +21,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value};
 use url::Url;
 
+use crate::egress_redact::maybe_redact_messages;
 use crate::sse;
 
 /// Hardcoded default. Overridable via `--model` / `HARNESS_MODEL` / `settings.json.model`.
@@ -58,6 +59,11 @@ pub struct AnthropicProvider {
     /// When true (default), attach `cache_control: ephemeral` to the last
     /// system block and the last tool. Tests can disable for exact wire diffs.
     prompt_caching: bool,
+    /// Opt-in egress redaction. When true, `ContentBlock::ToolResult.content`
+    /// and assistant `ContentBlock::Text.text` are passed through
+    /// `harness_mem::redact::redact_str` before the outbound request body is
+    /// constructed. See `docs/security/egress-redaction.md`. Default: off.
+    redact_egress: bool,
 }
 
 impl std::fmt::Debug for AnthropicProvider {
@@ -118,6 +124,7 @@ impl AnthropicProvider {
             model: model.into(),
             base_url,
             prompt_caching: true,
+            redact_egress: false,
         })
     }
 
@@ -128,6 +135,22 @@ impl AnthropicProvider {
     pub fn with_prompt_caching(mut self, enabled: bool) -> Self {
         self.prompt_caching = enabled;
         self
+    }
+
+    /// Enable egress-side secret redaction. When on, tool_result bodies and
+    /// assistant text blocks are scrubbed through the shared
+    /// `harness_mem::redact` patterns before the outbound HTTP body is
+    /// constructed. See `docs/security/egress-redaction.md`. Default: off.
+    #[must_use]
+    pub fn with_redact_egress(mut self, enabled: bool) -> Self {
+        self.redact_egress = enabled;
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn redact_egress_enabled(&self) -> bool {
+        self.redact_egress
     }
 
     /// Override the base URL used for `/v1/messages`. Primarily for end-to-end
@@ -167,7 +190,16 @@ impl Provider for AnthropicProvider {
         let oauth_mode = matches!(self.auth, AuthMode::OAuth(_));
         #[cfg(not(feature = "claude-code-oauth"))]
         let oauth_mode = false;
-        let body = build_request_body(&self.model, &req, self.prompt_caching, oauth_mode);
+        // Apply opt-in egress redaction BEFORE wire-format construction so
+        // scrubbed strings are what gets serialized.
+        let scrubbed = maybe_redact_messages(req.messages, self.redact_egress);
+        let req_eff = StreamRequest {
+            system: req.system,
+            messages: &scrubbed,
+            tools: req.tools,
+            max_tokens: req.max_tokens,
+        };
+        let body = build_request_body(&self.model, &req_eff, self.prompt_caching, oauth_mode);
 
         let mut builder = self
             .client
@@ -544,6 +576,125 @@ mod tests {
         );
     }
 
+    // Egress redaction mock-server tests — see
+    // `docs/security/egress-redaction.md`. The body capture pattern mirrors
+    // the openai module's `mock_server_e2e`.
+    mod egress_redaction_e2e {
+        use super::*;
+        use futures_util::StreamExt;
+        use harness_proto::{ContentBlock, Message};
+        use secrecy::SecretString;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        const FAKE_SECRET: &str = "sk-ant-api03-abcdefghij1234567890XYZ";
+
+        async fn serve_once(captured: std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>) -> u16 {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 16 * 1024];
+                let mut total = Vec::new();
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    total.extend_from_slice(&buf[..n]);
+                    if let Some(hdr_end) = total.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let header_str = std::str::from_utf8(&total[..hdr_end]).unwrap_or("");
+                        let cl = header_str
+                            .lines()
+                            .find_map(|l| {
+                                let l = l.to_ascii_lowercase();
+                                l.strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        if total.len() - (hdr_end + 4) >= cl {
+                            break;
+                        }
+                    }
+                }
+                *captured.lock().await = total;
+                // Anthropic SSE minimal: message_stop immediately. We don't
+                // need a well-formed event stream because our assertions are
+                // on the inbound request body, not outbound events.
+                let body = b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n",
+                    body.len()
+                );
+                sock.write_all(hdr.as_bytes()).await.unwrap();
+                sock.write_all(body).await.unwrap();
+                sock.flush().await.unwrap();
+            });
+            port
+        }
+
+        fn build_provider(port: u16, redact_egress: bool) -> AnthropicProvider {
+            AnthropicProvider {
+                client: reqwest::Client::new(),
+                auth: AuthMode::ApiKey(SecretString::from("test".to_string())),
+                model: "claude-opus-4-7".into(),
+                base_url: Url::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
+                prompt_caching: false,
+                redact_egress,
+            }
+        }
+
+        fn tool_result_message() -> Message {
+            Message::user_tool_results(vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".into(),
+                content: format!("got {FAKE_SECRET} back"),
+                is_error: false,
+                cache_control: None,
+            }])
+        }
+
+        async fn capture(redact_egress: bool) -> String {
+            let captured = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<u8>::new()));
+            let port = serve_once(captured.clone()).await;
+            let provider = build_provider(port, redact_egress);
+
+            let msgs = vec![tool_result_message()];
+            let req = StreamRequest {
+                system: "",
+                messages: &msgs,
+                tools: &[],
+                max_tokens: 64,
+            };
+            if let Ok(mut s) = provider.stream(req).await {
+                while s.next().await.is_some() {}
+            }
+            let bytes = captured.lock().await.clone();
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+
+        #[tokio::test]
+        async fn egress_off_by_default_sends_raw_secret_to_provider() {
+            let body = capture(false).await;
+            assert!(
+                body.contains(FAKE_SECRET),
+                "default-off Anthropic path must forward raw tool_result content"
+            );
+        }
+
+        #[tokio::test]
+        async fn egress_on_redacts_secret_in_outbound_body() {
+            let body = capture(true).await;
+            assert!(
+                !body.contains(FAKE_SECRET),
+                "secret leaked into outbound Anthropic body despite redact_egress=true: {body}"
+            );
+            assert!(
+                body.contains("[REDACTED:sk]"),
+                "redaction marker missing in Anthropic outbound body: {body}"
+            );
+        }
+    }
+
     #[test]
     fn provider_default_has_caching_enabled() {
         // Build directly to avoid env-var dependency in this test.
@@ -553,6 +704,7 @@ mod tests {
             model: "claude-opus-4-7".into(),
             base_url: Url::parse(DEFAULT_BASE_URL).unwrap(),
             prompt_caching: true,
+            redact_egress: false,
         };
         assert!(p.prompt_caching_enabled());
         let p = p.with_prompt_caching(false);
