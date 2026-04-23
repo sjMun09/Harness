@@ -43,6 +43,28 @@ harness ask \
 로컬 런타임이 `/v1/chat/completions` 만 OpenAI 스펙대로 구현해 두면,
 harness 입장에선 OpenAI 가 움직이는 것과 구분되지 않습니다.
 
+### Docker / `host.docker.internal` 주의
+
+harness 가 컨테이너 안에서 돌고 런타임이 호스트에 돌 때 (`ollama` 가 host 에서
+`11434` 포트를 열고 있는 흔한 경우), 컨테이너에서 호스트로 접근하려면 Docker
+Desktop 이 제공하는 `host.docker.internal` 을 쓰게 됩니다:
+
+```bash
+harness ask \
+  --model openai/qwen2.5-coder:14b \
+  --base-url http://host.docker.internal:11434/v1 \
+  "..."
+```
+
+이때 `is_local_url` 은 **loopback 이 아니라 판단해서 매치하지 않습니다**
+(`crates/harness-provider/src/openai.rs:144` — `localhost` / 127.x / ::1 만 local 로 본다. DNS 는 일부러 질의하지 않음). 따라서:
+
+- `OPENAI_API_KEY` 가 없으면 harness 가 `Auth("OPENAI_API_KEY not set")` 로 실패. 로컬 런타임이 bearer 를 검증하지 않아도 **플레이스홀더 키를 명시** 해야 합니다:
+  ```bash
+  export OPENAI_API_KEY=local
+  ```
+- `HARNESS_REFUSE_API_KEY=1` 가 켜져 있으면 이 경로도 **metered 로 취급되어 차단** 됩니다. 컨테이너 세션에선 락을 비우거나, 래퍼에서 loopback 을 강제하세요.
+
 ---
 
 ## 어떤 런타임이 어디에 맞는가

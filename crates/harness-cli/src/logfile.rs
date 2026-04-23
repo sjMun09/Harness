@@ -1,9 +1,9 @@
 //! Rolling per-session log file.
 //!
-//! Path: `$XDG_STATE_HOME/harness/logs/<id>.log`, where `<id>` is a timestamp
-//! + PID so we don't clash across parallel invocations. The file is opened
-//! append + 0600 (Unix) and wrapped in a `Mutex<File>` so the tracing layer
-//! can write from multiple threads.
+//! Path: `$XDG_STATE_HOME/harness/logs/<id>.log`, where `<id>` is a
+//! timestamp plus PID so we don't clash across parallel invocations. The
+//! file is opened append + 0600 (Unix) and wrapped in a `Mutex<File>` so
+//! the tracing layer can write from multiple threads.
 //!
 //! Deliberately does **not** depend on `tracing_appender`: the workspace
 //! doesn't pull it in and we don't need rotation for the CLI use case (each
@@ -46,10 +46,7 @@ pub fn open(id: &str) -> io::Result<(Arc<Mutex<File>>, PathBuf)> {
         #[cfg(unix)]
         set_mode(parent, 0o700)?;
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
+    let file = OpenOptions::new().create(true).append(true).open(&path)?;
     #[cfg(unix)]
     set_mode(&path, 0o600)?;
     Ok((Arc::new(Mutex::new(file)), path))
