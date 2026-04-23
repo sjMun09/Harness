@@ -81,6 +81,10 @@ impl Tool for ImportTraceTool {
         "ImportTrace"
     }
 
+    fn description(&self) -> &'static str {
+        "Walk MyBatis <include> or FreeMarker <#include>/<#import> references from a root file and list every transitively included file."
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",

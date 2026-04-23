@@ -184,7 +184,7 @@ pub async fn run_turn_with_outcome(
         .iter()
         .map(|t| ToolSpec {
             name: t.name().to_string(),
-            description: String::new(),
+            description: t.description().to_string(),
             input_schema: t.schema(),
         })
         .collect();
@@ -740,6 +740,9 @@ mod tests {
             fn name(&self) -> &str {
                 "Edit"
             }
+            fn description(&self) -> &'static str {
+                "test echo edit"
+            }
             fn schema(&self) -> Value {
                 json!({"type": "object"})
             }
@@ -875,6 +878,9 @@ mod tests {
         impl Tool for Echo {
             fn name(&self) -> &str {
                 "Echo"
+            }
+            fn description(&self) -> &'static str {
+                "test echo tool"
             }
             fn schema(&self) -> Value {
                 json!({"type":"object"})

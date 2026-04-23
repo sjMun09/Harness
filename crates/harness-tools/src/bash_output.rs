@@ -28,6 +28,10 @@ impl Tool for BashOutputTool {
         "BashOutput"
     }
 
+    fn description(&self) -> &'static str {
+        "Fetch new stdout/stderr lines produced by a background Bash job since the last poll."
+    }
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
