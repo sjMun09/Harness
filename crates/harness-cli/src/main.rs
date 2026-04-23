@@ -9,6 +9,16 @@ mod line_mode;
 mod logfile;
 mod metrics;
 mod models;
+// `prompt` module holds the TTY-driven `[y/n/a/d]` Ask flow. It's fully
+// unit-tested but NOT yet wired into the engine — `harness-core::engine`
+// calls `ctx.permission.evaluate` directly on the concrete
+// `PermissionSnapshot`, which means the Ask → prompt bridge needs a core
+// hook that this workstream is not allowed to add. See `prompt.rs` header
+// for the migration path.
+// TODO: need core hook — wire `prompt::ask_user` once `ToolCtx` exposes
+// an `Option<Box<dyn AskPrompt>>` field.
+#[allow(dead_code)]
+mod prompt;
 mod redact;
 mod subagent_host;
 mod trust;
