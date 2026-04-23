@@ -436,6 +436,7 @@ async fn drive_one_turn(
     cancel: Option<&CancellationToken>,
 ) -> Result<DriveOutcome, anyhow::Error> {
     let mut finalize_retries = 0u32;
+    let mut provider_retries = 0u32;
     loop {
         if let Some(tok) = cancel {
             if tok.is_cancelled() {
@@ -450,20 +451,33 @@ async fn drive_one_turn(
             max_tokens: 0,
         };
 
-        let stream = if let Some(tok) = cancel {
+        let stream_res = if let Some(tok) = cancel {
             tokio::select! {
                 biased;
                 () = tok.cancelled() => {
                     return Ok(DriveOutcome::Cancelled { partial: None });
                 }
-                s = provider.stream(req) => s
-                    .map_err(|e| anyhow::anyhow!("provider stream open: {e}"))?,
+                s = provider.stream(req) => s,
             }
         } else {
-            provider
-                .stream(req)
-                .await
-                .map_err(|e| anyhow::anyhow!("provider stream open: {e}"))?
+            provider.stream(req).await
+        };
+
+        let stream = match stream_res {
+            Ok(s) => s,
+            Err(e) if e.is_retryable() && provider_retries < MAX_PROVIDER_RETRIES => {
+                let delay = retry_delay(provider_retries, e.retry_after());
+                provider_retries += 1;
+                warn!(
+                    error = %e,
+                    attempt = provider_retries,
+                    backoff_ms = delay.as_millis() as u64,
+                    "provider stream open failed — backing off and retrying",
+                );
+                sleep_or_cancel(delay, cancel).await;
+                continue;
+            }
+            Err(e) => return Err(anyhow::anyhow!("provider stream open: {e}")),
         };
 
         match consume_stream(stream, cancel).await {
@@ -497,8 +511,50 @@ async fn drive_one_turn(
                 continue;
             }
             Err(DriveErr::Finalize(e)) => return Err(anyhow::anyhow!("finalize: {e}")),
+            Err(DriveErr::Provider(e))
+                if e.is_retryable() && provider_retries < MAX_PROVIDER_RETRIES =>
+            {
+                let delay = retry_delay(provider_retries, e.retry_after());
+                provider_retries += 1;
+                warn!(
+                    error = %e,
+                    attempt = provider_retries,
+                    backoff_ms = delay.as_millis() as u64,
+                    "provider stream error — backing off and retrying",
+                );
+                sleep_or_cancel(delay, cancel).await;
+                continue;
+            }
             Err(DriveErr::Provider(e)) => return Err(anyhow::anyhow!("provider: {e}")),
         }
+    }
+}
+
+/// Exponential backoff for provider retries (100 ms / 400 ms / 1 600 ms).
+/// If the provider reported an explicit `Retry-After`, use the larger of
+/// that and the backoff so we never probe sooner than the server asked.
+fn retry_delay(attempt: u32, retry_after: Option<std::time::Duration>) -> std::time::Duration {
+    // 100ms * 4^attempt: 100 / 400 / 1600
+    let exp = 100u64.saturating_mul(4u64.saturating_pow(attempt));
+    let backoff = std::time::Duration::from_millis(exp);
+    match retry_after {
+        Some(ra) if ra > backoff => ra,
+        _ => backoff,
+    }
+}
+
+/// Sleep for `delay` but wake early on cancel. Never fails — cancel during
+/// the sleep simply shortens the wait; the outer loop's cancel check picks
+/// it up on the next iteration.
+async fn sleep_or_cancel(delay: std::time::Duration, cancel: Option<&CancellationToken>) {
+    if let Some(tok) = cancel {
+        tokio::select! {
+            biased;
+            () = tok.cancelled() => {}
+            () = tokio::time::sleep(delay) => {}
+        }
+    } else {
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -1602,5 +1658,144 @@ mod tests {
             }
             other => panic!("expected synthetic Text, got {other:?}"),
         }
+    }
+
+    /// Exponential backoff schedule: 100 ms / 400 ms / 1600 ms, and
+    /// `retry_after` overrides when larger.
+    #[test]
+    fn retry_delay_follows_exponential_schedule() {
+        use std::time::Duration;
+        assert_eq!(retry_delay(0, None), Duration::from_millis(100));
+        assert_eq!(retry_delay(1, None), Duration::from_millis(400));
+        assert_eq!(retry_delay(2, None), Duration::from_millis(1_600));
+        // retry_after longer than backoff wins.
+        assert_eq!(
+            retry_delay(0, Some(Duration::from_secs(5))),
+            Duration::from_secs(5)
+        );
+        // retry_after shorter than backoff is ignored.
+        assert_eq!(
+            retry_delay(2, Some(Duration::from_millis(10))),
+            Duration::from_millis(1_600)
+        );
+    }
+
+    /// Transport errors on stream open trigger up to `MAX_PROVIDER_RETRIES`
+    /// retries before surfacing the final error. Uses a provider that refuses
+    /// every call; we verify the call count grows past the first attempt.
+    /// The backoff schedule is 100 + 400 + 1600 ≈ 2.1 s total — fine in real
+    /// time, and the test exits as soon as the final attempt resolves.
+    #[tokio::test]
+    async fn transport_error_retries_before_giving_up() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct FlakyProvider {
+            attempts: Arc<AtomicU32>,
+        }
+        #[async_trait]
+        impl Provider for FlakyProvider {
+            async fn stream(
+                &self,
+                _req: StreamRequest<'_>,
+            ) -> Result<crate::provider::EventStream, ProviderError> {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                Err(ProviderError::Transport("simulated connreset".into()))
+            }
+        }
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let provider = Arc::new(FlakyProvider {
+            attempts: attempts.clone(),
+        });
+        let dir = tempfile::tempdir().unwrap();
+
+        let res = run_turn(
+            EngineInputs {
+                provider,
+                tools: Vec::new(),
+                system: String::new(),
+                ctx: mk_ctx(dir.path()),
+                max_turns: 1,
+                plan_gate: PlanGateState::default(),
+                event_sink: None,
+                cancel: None,
+            },
+            vec![Message::user("hi")],
+        )
+        .await;
+        assert!(res.is_err(), "expected final error after retries");
+        // 1 initial attempt + MAX_PROVIDER_RETRIES retries.
+        let n = attempts.load(Ordering::SeqCst);
+        assert_eq!(n, 1 + MAX_PROVIDER_RETRIES, "attempts: {n}");
+    }
+
+    /// A retryable error that resolves on attempt 2 returns a successful
+    /// turn outcome — verifies the happy-path retry loop doesn't leak errors.
+    #[tokio::test]
+    async fn transport_error_recovers_after_retry() {
+        use futures_util::stream;
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct RecoveringProvider {
+            attempts: Arc<AtomicU32>,
+        }
+        #[async_trait]
+        impl Provider for RecoveringProvider {
+            async fn stream(
+                &self,
+                _req: StreamRequest<'_>,
+            ) -> Result<crate::provider::EventStream, ProviderError> {
+                let n = self.attempts.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    return Err(ProviderError::Server(503));
+                }
+                let events = vec![
+                    Ok(StreamEvent::MessageStart {
+                        message_id: "m".into(),
+                        usage: Usage::default(),
+                    }),
+                    Ok(StreamEvent::ContentBlockStart {
+                        index: 0,
+                        block: ContentBlockHeader::Text,
+                    }),
+                    Ok(StreamEvent::ContentBlockDelta {
+                        index: 0,
+                        delta: crate::provider::ContentDelta::Text("ok".into()),
+                    }),
+                    Ok(StreamEvent::ContentBlockStop { index: 0 }),
+                    Ok(StreamEvent::MessageDelta {
+                        stop_reason: Some(StopReason::EndTurn),
+                        usage: Usage::default(),
+                    }),
+                    Ok(StreamEvent::MessageStop),
+                ];
+                Ok(Box::pin(stream::iter(events))
+                    as Pin<Box<dyn futures_core::Stream<Item = _> + Send + 'static>>)
+            }
+        }
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let provider = Arc::new(RecoveringProvider {
+            attempts: attempts.clone(),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let msgs = run_turn(
+            EngineInputs {
+                provider,
+                tools: Vec::new(),
+                system: String::new(),
+                ctx: mk_ctx(dir.path()),
+                max_turns: 1,
+                plan_gate: PlanGateState::default(),
+                event_sink: None,
+                cancel: None,
+            },
+            vec![Message::user("hi")],
+        )
+        .await
+        .expect("second attempt should succeed");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(msgs.len() >= 2, "missing assistant reply: {msgs:?}");
     }
 }
