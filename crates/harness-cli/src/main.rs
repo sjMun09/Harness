@@ -4,8 +4,21 @@
 #![forbid(unsafe_code)]
 
 mod config_import;
+mod doctor;
 mod line_mode;
+mod logfile;
 mod metrics;
+mod models;
+// `prompt` module holds the TTY-driven `[y/n/a/d]` Ask flow. It's fully
+// unit-tested but NOT yet wired into the engine — `harness-core::engine`
+// calls `ctx.permission.evaluate` directly on the concrete
+// `PermissionSnapshot`, which means the Ask → prompt bridge needs a core
+// hook that this workstream is not allowed to add. See `prompt.rs` header
+// for the migration path.
+// TODO: need core hook — wire `prompt::ask_user` once `ToolCtx` exposes
+// an `Option<Box<dyn AskPrompt>>` field.
+#[allow(dead_code)]
+mod prompt;
 mod redact;
 mod subagent_host;
 mod trust;
@@ -15,6 +28,7 @@ mod tui_bridge;
 use std::io::{IsTerminal, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -78,6 +92,31 @@ const DEFAULT_MAX_TURNS: u32 = 20;
 /// can detect a user abort.
 pub const EXIT_USER_INTERRUPT: u8 = 130;
 
+/// Global `--quiet` flag. Set once from `main` before any banner helper runs.
+/// Banner helpers (`cli_banner!`) skip printing when this is `true`; tracing
+/// init also drops to `warn` level when set.
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+fn set_quiet(q: bool) {
+    QUIET.store(q, Ordering::Relaxed);
+}
+
+fn is_quiet() -> bool {
+    QUIET.load(Ordering::Relaxed)
+}
+
+/// Print a setup/diagnostic line to stderr unless `--quiet` is set. Used for
+/// `[auth]`, `[session …]`, `[log …]` — DX noise that `-q` silences.
+/// Critical warnings (dangerously-skip-permissions banner, incompatible-flag
+/// errors) MUST call `eprintln!` directly, not this helper.
+macro_rules! cli_banner {
+    ($($arg:tt)*) => {{
+        if !$crate::is_quiet() {
+            eprintln!($($arg)*);
+        }
+    }};
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "harness",
@@ -94,6 +133,12 @@ struct Cli {
     /// Verbose logging. Enables DEBUG tracing; shows warning banner (§8.2).
     #[arg(long, short = 'v', global = true)]
     verbose: bool,
+
+    /// Suppress `[auth]` / session banners on stderr and drop the tracing
+    /// filter to `warn`. The rolling log file still receives `info` events.
+    /// Mutually exclusive with `--verbose` — `--verbose` wins.
+    #[arg(long, short = 'q', global = true)]
+    quiet: bool,
 
     /// Bypass the default-Ask safety net — treat every Ask as Allow.
     /// Off unless explicitly passed (§8.2).
@@ -159,6 +204,12 @@ enum Cmd {
     /// Config management (settings.json).
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Print supported model naming conventions + example invocations.
+    /// Static help text; no network calls.
+    Models,
+    /// Print runtime diagnostics: auth status, trust, settings path,
+    /// effective `OPENAI_BASE_URL`, feature flags, `.harnessignore`.
+    Doctor,
 }
 
 #[derive(Subcommand, Debug)]
@@ -200,12 +251,56 @@ pub enum SessionExit {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    init_tracing(cli.verbose);
+    // Order matters: `set_quiet` before the tracing init + any banner.
+    set_quiet(cli.quiet);
+
+    // Task 5: open the rolling log file up-front so every tracing event from
+    // the rest of `main` lands in it. Failure is non-fatal — the user still
+    // sees stderr, and we fall back to stderr-only.
+    let log_id = logfile::log_id();
+    let log_handle = match logfile::open(&log_id) {
+        Ok((h, p)) => {
+            cli_banner!("[log] {}", p.display());
+            Some(h)
+        }
+        Err(e) => {
+            // Use eprintln (not cli_banner) — even quiet users should see a
+            // log-file open failure, since it changes audit expectations.
+            eprintln!("[warn] could not open log file: {e}");
+            None
+        }
+    };
+    init_tracing(cli.verbose, cli.quiet, log_handle);
+
+    // PLAN §8.2 loud-banner: `--dangerously-skip-permissions` MUST be visible
+    // regardless of `--quiet` — operators silencing logs shouldn't also hide
+    // the "all tools run without prompt" warning.
+    if cli.dangerously_skip_permissions {
+        eprintln!(
+            "\x1b[1;41;97m⚠ DANGEROUS\x1b[0m \x1b[31mpermission checks bypassed — all tools runnable without prompt\x1b[0m"
+        );
+    }
 
     #[cfg(feature = "tui")]
     let tui = cli.tui;
     #[cfg(not(feature = "tui"))]
     let tui = false;
+
+    // Task 8: `--tui` + `--metrics-json` are incompatible. Silently dropping
+    // the metrics file when `--tui` is set diverges from user expectation —
+    // reject up front so nobody builds a benchmark harness on a file that
+    // will never land.
+    if let Cmd::Ask {
+        ref metrics_json, ..
+    } = cli.cmd
+    {
+        if tui && metrics_json.is_some() {
+            eprintln!(
+                "error: --metrics-json is not supported with --tui (TUI path does not emit run metrics). Drop one of the flags."
+            );
+            return ExitCode::FAILURE;
+        }
+    }
 
     let result = match cli.cmd {
         Cmd::Ask {
@@ -258,6 +353,14 @@ async fn main() -> ExitCode {
             ConfigCmd::Show => cmd_config_show().await,
             ConfigCmd::Path => cmd_config_path().await,
         },
+        Cmd::Models => {
+            models::cmd_models();
+            Ok(SessionExit::Ok)
+        }
+        Cmd::Doctor => {
+            doctor::cmd_doctor();
+            Ok(SessionExit::Ok)
+        }
     };
 
     match result {
@@ -309,20 +412,82 @@ async fn resolve_prompt(prompt: Option<String>, subcmd: &str) -> anyhow::Result<
     Ok(text)
 }
 
-fn init_tracing(verbose: bool) {
+fn init_tracing(
+    verbose: bool,
+    quiet: bool,
+    log_handle: Option<Arc<std::sync::Mutex<std::fs::File>>>,
+) {
     if verbose {
         // PLAN §8.2: warn banner when DEBUG tracing is active.
         eprintln!(
             "[warn] verbose logging enabled — output may include secret values despite redaction. Do not share logs."
         );
     }
+    // Default filter: `--verbose` wins over `--quiet` (quiet still gets
+    // `info` into the file; stderr is muted at the `MakeWriter` layer).
     let default = if verbose { "debug" } else { "info" };
     let filter = EnvFilter::try_from_env("HARNESS_LOG").unwrap_or_else(|_| EnvFilter::new(default));
-    let redacting_writer = redact::RedactingMakeWriter::new(std::io::stderr);
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(redacting_writer)
-        .try_init();
+
+    // stderr arm (or sink when --quiet). We avoid `Box<dyn MakeWriter>`
+    // because `RedactingMakeWriter` is parameterised on the concrete type —
+    // using a manual enum keeps the generics tree small.
+    let stderr_writer = StderrOrSink { quiet };
+    let stderr_redacted = redact::RedactingMakeWriter::new(stderr_writer);
+
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
+    let _ = match log_handle {
+        Some(h) => {
+            let file = logfile::SharedFileMakeWriter::new(h);
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(stderr_redacted.and(file))
+                .try_init()
+        }
+        None => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(stderr_redacted)
+            .try_init(),
+    };
+}
+
+/// `MakeWriter` that emits to stderr, or swallows writes when `quiet` is
+/// set. The `Writer` associated type is an enum of the two concrete cases
+/// so we don't need a trait object.
+#[derive(Clone, Debug)]
+struct StderrOrSink {
+    quiet: bool,
+}
+
+/// Concrete writer enum — avoids `Box<dyn Write>` at the hot path.
+enum StderrOrSinkWriter {
+    Err(std::io::Stderr),
+    Sink(std::io::Sink),
+}
+
+impl std::io::Write for StderrOrSinkWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Err(w) => w.write(buf),
+            Self::Sink(w) => w.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Err(w) => w.flush(),
+            Self::Sink(w) => w.flush(),
+        }
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for StderrOrSink {
+    type Writer = StderrOrSinkWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        if self.quiet {
+            StderrOrSinkWriter::Sink(std::io::sink())
+        } else {
+            StderrOrSinkWriter::Err(std::io::stderr())
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -432,12 +597,17 @@ async fn run_session_core(run: SessionRun) -> anyhow::Result<SessionExit> {
         prompt_sha256,
     } = run;
 
-    let cwd = std::env::current_dir().context("cwd")?;
-    if trust_cwd {
+    let raw_cwd = std::env::current_dir().context("cwd")?;
+    // Use the canonical path returned by `ensure_trusted` as the effective cwd.
+    // Closes the TOCTOU hole where `ensure_trusted` canonicalized one path and
+    // a second `current_dir()` call could observe a different (symlink-moved)
+    // one after the check.
+    let cwd = if trust_cwd {
         trust::skip_trust_check();
+        std::fs::canonicalize(&raw_cwd).unwrap_or(raw_cwd)
     } else {
-        trust::ensure_trusted(&cwd)?;
-    }
+        trust::ensure_trusted(&raw_cwd)?
+    };
 
     let provider: Arc<dyn Provider> = build_provider(&model, auth, base_url.as_deref())?;
 
@@ -632,7 +802,7 @@ async fn run_session_core(run: SessionRun) -> anyhow::Result<SessionExit> {
         }
     }
 
-    eprintln!("[session {session_id}]");
+    cli_banner!("[session {session_id}]");
     Ok(session_exit)
 }
 
@@ -664,12 +834,13 @@ async fn run_session_tui(run: SessionRun) -> anyhow::Result<SessionExit> {
         prompt_sha256: _,
     } = run;
 
-    let cwd = std::env::current_dir().context("cwd")?;
-    if trust_cwd {
+    let raw_cwd = std::env::current_dir().context("cwd")?;
+    let cwd = if trust_cwd {
         trust::skip_trust_check();
+        std::fs::canonicalize(&raw_cwd).unwrap_or(raw_cwd)
     } else {
-        trust::ensure_trusted(&cwd)?;
-    }
+        trust::ensure_trusted(&raw_cwd)?
+    };
 
     let provider: Arc<dyn Provider> = build_provider(&model, auth, base_url.as_deref())?;
     let tools = harness_tools::all_tools();
@@ -825,7 +996,7 @@ async fn run_session_tui(run: SessionRun) -> anyhow::Result<SessionExit> {
     if let Err(e) = transaction.commit().await {
         tracing::warn!(error = %e, "tx commit failed; staging dir may linger");
     }
-    eprintln!("[session {session_id}]");
+    cli_banner!("[session {session_id}]");
     Ok(session_exit)
 }
 
@@ -892,9 +1063,9 @@ fn build_provider(
         }
         let model_norm = model.strip_prefix("openai/").unwrap_or(model).to_string();
         if targets_local {
-            eprintln!("[auth] local-llm provider=openai-compat");
+            cli_banner!("[auth] local-llm provider=openai-compat");
         } else {
-            eprintln!("[auth] api-key (OPENAI_API_KEY) provider=openai");
+            cli_banner!("[auth] api-key (OPENAI_API_KEY) provider=openai");
         }
         let p = OpenAIProvider::new_with_base_url(model_norm, base_url_parsed).context(
             "build OpenAI provider — is OPENAI_API_KEY set? (not required for localhost)",
@@ -918,15 +1089,15 @@ fn build_provider(
             let tok = load_oauth_token().context(
                 "load Claude Code OAuth token — run `claude` once to sign in, then retry",
             )?;
-            eprintln!("[auth] oauth (Claude Code subscription)");
+            cli_banner!("[auth] oauth (Claude Code subscription)");
             AnthropicProvider::with_oauth(model.to_string(), tok.access_token)
                 .context("build Anthropic provider in OAuth mode")?
         }
         #[cfg(not(feature = "claude-code-oauth"))]
         AuthChoice::Oauth => {
             anyhow::bail!(
-                "OAuth auth requires building with --features claude-code-oauth. \
-                 See README for trade-offs."
+                "OAuth auth requires building with --features claude-code-oauth. Rebuild with:\n\
+                 \n    cargo install --git https://github.com/sjMun09/Harness --features claude-code-oauth\n"
             );
         }
         #[cfg(feature = "claude-code-oauth")]
@@ -938,7 +1109,7 @@ fn build_provider(
             // OAuth is unavailable AND the hard lock isn't set.
             match load_oauth_token() {
                 Ok(tok) => {
-                    eprintln!("[auth] oauth (Claude Code subscription)");
+                    cli_banner!("[auth] oauth (Claude Code subscription)");
                     AnthropicProvider::with_oauth(model.to_string(), tok.access_token)
                         .context("build Anthropic provider in OAuth mode")?
                 }
@@ -950,7 +1121,7 @@ fn build_provider(
                         );
                     }
                     if env_has("ANTHROPIC_API_KEY") {
-                        eprintln!(
+                        cli_banner!(
                             "[auth] api-key (ANTHROPIC_API_KEY) — OAuth unavailable: {oauth_err}"
                         );
                         AnthropicProvider::new(model.to_string())
@@ -977,11 +1148,11 @@ fn build_provider(
             }
             if !env_has("ANTHROPIC_API_KEY") {
                 anyhow::bail!(
-                    "no credential available — set ANTHROPIC_API_KEY, or rebuild with \
-                     `--features claude-code-oauth` to enable Claude Code OAuth reuse."
+                    "no credential available — set ANTHROPIC_API_KEY, or rebuild with OAuth support:\n\
+                     \n    cargo install --git https://github.com/sjMun09/Harness --features claude-code-oauth\n"
                 );
             }
-            eprintln!("[auth] api-key (ANTHROPIC_API_KEY)");
+            cli_banner!("[auth] api-key (ANTHROPIC_API_KEY)");
             AnthropicProvider::new(model.to_string())
                 .context("build Anthropic provider from ANTHROPIC_API_KEY")?
         }
@@ -1124,9 +1295,11 @@ async fn cmd_session_resume(
     let mut initial = loaded.messages;
     initial.push(Message::user(prompt));
 
-    eprintln!(
+    cli_banner!(
         "[resume] session={} prior_messages={} model={}",
-        loaded.header.id, already, model,
+        loaded.header.id,
+        already,
+        model,
     );
 
     run_session_core(SessionRun {

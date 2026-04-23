@@ -475,6 +475,19 @@ assistant 가 turn 중에 자연어 + tool_use 블록으로 호출할 수 있는
 - `SessionStart` hook 이 세 파일을 읽어 system prompt 에 합쳐 넣는다.
 - MVP: 통째 로드(글로벌 먼저, 프로젝트가 override). 섹션 태그 / canonical / anti 마커는 iter 2.
 
+### `.harnessignore` — Glob / Grep 범위 좁히기
+
+`<cwd>/.harnessignore` 는 `Glob` / `Grep` 툴의 스캔 대상에서 제외할 경로 패턴을
+담는 파일입니다. 문법은 `.gitignore` 와 동일 (`ignore` 크레이트 사용). 예:
+
+```
+node_modules/
+target/
+dist/
+```
+
+파일이 있으면 에이전트가 대형 artifact 디렉터리로 걸어 들어가 수백 ms 를 낭비하는 일이 줄어듭니다 (`harness doctor` 로 존재 여부 확인 가능).
+
 ### Hooks
 
 Claude Code 의 hook 모델과 호환. 4 이벤트 지원:
@@ -507,8 +520,14 @@ Claude Code 의 hook 모델과 호환. 4 이벤트 지원:
 ### 인증
 
 - **API key**: `export ANTHROPIC_API_KEY=sk-ant-...`. `--auth api-key` 로 강제할 수도 있음.
-- **OAuth**: macOS Keychain 에 저장된 Claude Code 토큰(`Claude Code-credentials`) 을 자동 로드. `--auth oauth` 로 강제.
+- **OAuth**: macOS Keychain 에 저장된 Claude Code 토큰(`Claude Code-credentials`) 을 자동 로드. `--auth oauth` 로 강제. OAuth 경로는 **opt-in 피처** 이므로 기본 빌드에는 포함되지 않음 — 아래 커맨드로 재설치:
+
+  ```bash
+  cargo install --git https://github.com/sjMun09/Harness --features claude-code-oauth
+  ```
+
 - **모델**: `--model` / `HARNESS_MODEL` / `settings.json.model` 순서. OpenAI 모델(`gpt-*`) 지정 시 OpenAI provider 라우트.
+- **진단**: 자격증명·cwd trust·설정 파일·feature flag 상태를 한 번에 보려면 `harness doctor`. 지원하는 모델 네이밍은 `harness models`.
 
 ---
 
