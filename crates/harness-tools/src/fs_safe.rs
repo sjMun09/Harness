@@ -248,31 +248,64 @@ pub fn check_deny_list(p: &Path) -> Result<(), PathError> {
 /// canonicalizes inside the cwd-root and passes containment. This guard runs
 /// unconditionally after the canonical prefix check.
 ///
-/// Best-effort: silently skipped when `$HOME` is unset or non-canonical (very
-/// unusual — tests use `env::set_var("HOME", ...)` to simulate).
+/// Two-layer check:
+///   1. `$HOME`-relative match when `$HOME` is set (precise, matches the
+///      `.aws/` prefix exactly under the user's home).
+///   2. Component-level fallback that fires regardless of `$HOME` — matches
+///      any `.ssh/`, `.aws/`, etc. anywhere in the canonical path. Fail-safe
+///      for the HOME-unset case (containers / systemd services / test
+///      harnesses that scrub env); also catches multi-user layouts like
+///      `/home/alice/.ssh/` when the tool runs as a different uid.
 fn check_home_sensitive(p: &Path) -> Result<(), PathError> {
-    let Some(home) = resolve_home() else {
-        return Ok(());
-    };
-    // Canonicalize `$HOME` where possible so the comparison tolerates symlinks
-    // like `/var` → `/private/var` on macOS. When canonicalize fails (e.g.
-    // custom test HOME that doesn't exist) fall back to the raw string.
-    let home_canonical = home.canonicalize().unwrap_or(home);
-    let Ok(rel) = p.strip_prefix(&home_canonical) else {
-        return Ok(());
-    };
-    let rel_str = rel.to_string_lossy();
-    for prefix in HOME_SENSITIVE_PREFIXES {
-        // Match the directory itself (`rel == ".aws"`) or anything beneath it
-        // (`rel == ".aws/credentials"`). A trailing `/` in the constant forces
-        // boundary alignment so `.awsfoo` doesn't match `.aws/`.
-        let stripped = prefix.trim_end_matches('/');
-        if rel_str == stripped || rel_str.starts_with(prefix) {
+    if let Some(home) = resolve_home() {
+        let home_canonical = home.canonicalize().unwrap_or(home);
+        if let Ok(rel) = p.strip_prefix(&home_canonical) {
+            let rel_str = rel.to_string_lossy();
+            for prefix in HOME_SENSITIVE_PREFIXES {
+                let stripped = prefix.trim_end_matches('/');
+                if rel_str == stripped || rel_str.starts_with(prefix) {
+                    return Err(PathError::Denied(p.to_path_buf()));
+                }
+            }
+            for file in HOME_SENSITIVE_FILES {
+                if rel_str == *file {
+                    return Err(PathError::Denied(p.to_path_buf()));
+                }
+            }
+        }
+    }
+
+    // Fallback — scan every component of the canonical path for a sensitive
+    // directory name. Runs unconditionally so HOME-unset / foreign-home
+    // scenarios cannot bypass the guard. False-positive rate is low: these
+    // are `.` (dot-prefixed) credential-directory names that do not appear
+    // in normal project trees.
+    let sensitive_dirs: &[&str] = &[".aws", ".ssh", ".gnupg", ".kube"];
+    for comp in p.components() {
+        if let Component::Normal(os) = comp {
+            let name = os.to_string_lossy();
+            if sensitive_dirs.iter().any(|d| name == *d) {
+                return Err(PathError::Denied(p.to_path_buf()));
+            }
+        }
+    }
+    // `.config/gh/` — a two-segment match (`.config` alone is too broad to
+    // deny, so require the `gh` child).
+    let comps: Vec<String> = p
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(os) => Some(os.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    for w in comps.windows(2) {
+        if w[0] == ".config" && w[1] == "gh" {
             return Err(PathError::Denied(p.to_path_buf()));
         }
     }
-    for file in HOME_SENSITIVE_FILES {
-        if rel_str == *file {
+    // Leaf-only sensitive files (.netrc etc.) — match at any depth.
+    if let Some(leaf) = p.file_name().map(|o| o.to_string_lossy().into_owned()) {
+        if HOME_SENSITIVE_FILES.iter().any(|f| *f == leaf) {
             return Err(PathError::Denied(p.to_path_buf()));
         }
     }
@@ -436,6 +469,12 @@ mod tests {
             std::env::set_var("HOME", new_home);
             Self { prev, _lock: lock }
         }
+        fn unset() -> Self {
+            let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("HOME");
+            std::env::remove_var("HOME");
+            Self { prev, _lock: lock }
+        }
     }
     impl Drop for HomeGuard {
         fn drop(&mut self) {
@@ -545,6 +584,81 @@ mod tests {
 
         let _g = HomeGuard::set(fake_home.path());
         let out = canonicalize_within(fake_home.path(), Path::new(".awsfoo/notes.md")).unwrap();
+        assert_eq!(out, f.canonicalize().unwrap());
+    }
+
+    /// Regression: fail-open when `$HOME` is unset — containers, systemd
+    /// services, minimal shells. The component-level fallback fires
+    /// regardless of env so the guard cannot be bypassed by scrubbing env.
+    #[cfg(unix)]
+    #[test]
+    fn home_sensitive_blocked_when_home_unset() {
+        let workdir = tempdir().unwrap();
+        // Build a path that contains `.ssh` under the workdir so the
+        // canonicalization stays inside root but the component-level check
+        // should still fire.
+        let ssh = workdir.path().join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(ssh.join("id_rsa"), "-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
+
+        let _g = HomeGuard::unset();
+        let err = canonicalize_within(workdir.path(), Path::new(".ssh/id_rsa")).unwrap_err();
+        assert!(
+            matches!(err, PathError::Denied(_)),
+            "expected Denied with HOME unset, got {err:?}"
+        );
+    }
+
+    /// Even with HOME set to an unrelated directory, an absolute path into a
+    /// *different* user's home must be denied via component match. Covers the
+    /// multi-user / CI scenario.
+    #[cfg(unix)]
+    #[test]
+    fn home_sensitive_blocked_for_foreign_home() {
+        let workdir = tempdir().unwrap();
+        let foreign = workdir.path().join(".aws");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("credentials"), "x").unwrap();
+
+        let unrelated_home = tempdir().unwrap();
+        let _g = HomeGuard::set(unrelated_home.path());
+
+        let err = canonicalize_within(workdir.path(), Path::new(".aws/credentials")).unwrap_err();
+        assert!(
+            matches!(err, PathError::Denied(_)),
+            "expected Denied, got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_sensitive_config_gh_blocked() {
+        let workdir = tempdir().unwrap();
+        let gh = workdir.path().join(".config").join("gh");
+        std::fs::create_dir_all(&gh).unwrap();
+        std::fs::write(gh.join("hosts.yml"), "token: x").unwrap();
+        let _g = HomeGuard::unset();
+        let err =
+            canonicalize_within(workdir.path(), Path::new(".config/gh/hosts.yml")).unwrap_err();
+        assert!(
+            matches!(err, PathError::Denied(_)),
+            "expected Denied, got {err:?}"
+        );
+    }
+
+    /// Plain `.config` (without the `gh` child) must still be allowed —
+    /// it's the standard XDG user-config directory and denying it would
+    /// break most tools.
+    #[cfg(unix)]
+    #[test]
+    fn home_dot_config_non_gh_allowed() {
+        let workdir = tempdir().unwrap();
+        let other = workdir.path().join(".config").join("htop");
+        std::fs::create_dir_all(&other).unwrap();
+        let f = other.join("htoprc");
+        std::fs::write(&f, "x").unwrap();
+        let _g = HomeGuard::unset();
+        let out = canonicalize_within(workdir.path(), Path::new(".config/htop/htoprc")).unwrap();
         assert_eq!(out, f.canonicalize().unwrap());
     }
 

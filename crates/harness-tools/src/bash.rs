@@ -88,20 +88,19 @@ pub const MAX_TIMEOUT_SECS: u64 = 600;
 /// same rule bucket.
 ///
 /// Shell-mode commands bypass the argv-level shlex decomposition that
-/// permission rules (harness-perm) rely on for prefix matching. Until the
-/// CLI settings schema grows a first-class `bash.allow_shell_mode` toggle,
-/// callers that genuinely need shell composition set this env var to `1`
-/// (or `true`).
+/// permission rules (harness-perm) rely on for prefix matching.
 ///
-/// TODO(settings): thread a `bash.allow_shell_mode: bool` through
-/// `harness-core::config::Settings` — would let operators pin this per repo
-/// via `.claude/settings.json` rather than per-shell env. Blocked on
-/// Workstream B / harness-core scope.
+/// Kept for headless / CI use — interactive TTY sessions should prefer the
+/// per-call `allow_shell_mode` input flag: the model declares shell-mode
+/// intent in the `tool_use` JSON, the Ask prompt surfaces the flag, and the
+/// operator approves/denies per command. The env var is a process-global
+/// yes that cannot be revoked mid-session; the input flag is per-call so
+/// logs / hooks can audit each shell composition on its own merits.
 pub const SHELL_MODE_ENV_VAR: &str = "HARNESS_BASH_ALLOW_SHELL_MODE";
 
 /// Check the env-var opt-in. Truthy values: `1`, `true`, `yes`, `on`
 /// (case-insensitive). Anything else — empty, unset, `0`, `false` — is deny.
-fn shell_mode_allowed() -> bool {
+fn shell_mode_env_allowed() -> bool {
     std::env::var(SHELL_MODE_ENV_VAR)
         .ok()
         .map(|v| {
@@ -116,9 +115,11 @@ fn shell_mode_denied_error() -> ToolError {
         "Bash `mode: \"shell\"` is disabled. Shell mode (sh -c) bypasses the \
          shlex-prefix permission rules used by `Bash(<prefix>)` — a wildcard \
          `Bash(*)` allow would otherwise cover arbitrary compound commands \
-         (`rm -rf ~`, shell redirects, etc.). Re-run with \
-         `{SHELL_MODE_ENV_VAR}=1` to opt in, or rewrite the command in argv \
-         mode (the default)."
+         (`rm -rf ~`, shell redirects, etc.). To opt in, either \
+         (a) set input `allow_shell_mode: true` so the Ask prompt can \
+         surface the intent per-call, or \
+         (b) for headless runs, export `{SHELL_MODE_ENV_VAR}=1`. \
+         Otherwise rewrite the command in argv mode (the default)."
     ))
 }
 
@@ -143,6 +144,14 @@ pub struct BashInput {
     pub description: Option<String>,
     #[serde(default)]
     pub run_in_background: bool,
+    /// Per-call opt-in for `mode: "shell"`. The model sets this to `true`
+    /// when it genuinely needs pipes / redirects / compound commands. The
+    /// value is visible to the engine's Ask prompt and to hook scripts so
+    /// operators can audit each shell-composition request on its own; a
+    /// process-global env-var opt-in (`HARNESS_BASH_ALLOW_SHELL_MODE=1`)
+    /// also satisfies the gate for headless / CI runs.
+    #[serde(default)]
+    pub allow_shell_mode: bool,
 }
 
 #[derive(Debug, Default)]
@@ -166,7 +175,12 @@ impl Tool for BashTool {
                 "mode":              { "type": "string", "enum": ["argv", "shell"], "default": "argv" },
                 "timeout_secs":      { "type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_SECS },
                 "description":       { "type": "string" },
-                "run_in_background": { "type": "boolean", "default": false }
+                "run_in_background": { "type": "boolean", "default": false },
+                "allow_shell_mode":  {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Required when mode='shell'. Declare intent per-call so the operator's Ask prompt can audit shell composition (pipes, redirects, compound commands)."
+                }
             },
             "required": ["command"]
         })
@@ -195,8 +209,10 @@ impl Tool for BashTool {
         let bi: BashInput = parse_input(input, "Bash")?;
 
         // Shell-mode gate: block *before* dispatching to spawn_background so
-        // the deny message is uniform for fg + bg callers.
-        if matches!(bi.mode, BashMode::Shell) && !shell_mode_allowed() {
+        // the deny message is uniform for fg + bg callers. Two opt-ins:
+        // per-call `allow_shell_mode: true` (preferred for interactive) or
+        // the process-global env var (kept for headless / CI).
+        if matches!(bi.mode, BashMode::Shell) && !bi.allow_shell_mode && !shell_mode_env_allowed() {
             return Err(shell_mode_denied_error());
         }
 
@@ -762,6 +778,30 @@ mod tests {
         assert!(matches!(err, ToolError::Validation(_)));
     }
 
+    /// Per-call opt-in via `allow_shell_mode: true` must satisfy the gate
+    /// even when the env var is off — this is the path an interactive
+    /// operator approves through the Ask prompt.
+    #[tokio::test]
+    async fn shell_mode_allowed_per_call_flag() {
+        let _shell = ShellEnvGuard::deny();
+        let dir = tempdir().unwrap();
+        let out = BashTool
+            .call(
+                serde_json::json!({
+                    "command": "echo per-call",
+                    "mode": "shell",
+                    "allow_shell_mode": true,
+                }),
+                ctx(dir.path()),
+            )
+            .await
+            .expect("per-call flag should open the gate");
+        assert!(out.summary.contains("per-call"));
+        assert!(out.summary.contains("exit 0"));
+    }
+
+    /// Backward-compat: the env var alone (no per-call flag) still works
+    /// for headless runs.
     #[tokio::test]
     async fn shell_mode_allowed_with_env() {
         let _shell = ShellEnvGuard::allow();

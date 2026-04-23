@@ -274,6 +274,80 @@ pub struct LoadedSession {
     pub messages: Vec<Message>,
 }
 
+/// Report returned by [`redact_file`].
+#[derive(Debug, Clone, Default)]
+pub struct RedactReport {
+    /// Path that was (re)written.
+    pub path: PathBuf,
+    /// Total non-empty lines scanned (excludes the trailing newline).
+    pub scanned: usize,
+    /// Lines whose serialized form changed after redaction.
+    pub changed: usize,
+    /// Lines that failed to parse as `Record` and were copied through verbatim.
+    /// These are logged but not rewritten — the redactor is conservative:
+    /// it won't mangle what it can't parse.
+    pub skipped: usize,
+}
+
+/// Rewrite a session JSONL file with redaction applied to every record.
+///
+/// Preserves line order and the header line unchanged. Writes via an atomic
+/// tmp-file + rename so a crash mid-rewrite leaves either the old file or
+/// the new one, never a truncated middle state. File mode is restored to
+/// `0600` on Unix.
+///
+/// Idempotent: re-running on an already-redacted session is a no-op (the
+/// redaction marker is designed to be a fixed point — see
+/// [`redact::redact_str`] docs).
+pub async fn redact_file(path: &Path) -> Result<RedactReport, MemError> {
+    let bytes = tokio::fs::read(path).await?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|e| MemError::Io(std::io::Error::other(format!("utf8: {e}"))))?;
+
+    let mut report = RedactReport {
+        path: path.to_path_buf(),
+        ..Default::default()
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut lines = text.split('\n');
+
+    if let Some(header) = lines.next() {
+        if !header.is_empty() {
+            out.push_str(header);
+            out.push('\n');
+        }
+    }
+
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        report.scanned += 1;
+        match serde_json::from_str::<Record>(line) {
+            Ok(mut rec) => {
+                redact_record(&mut rec);
+                let new_line = serde_json::to_string(&rec)?;
+                if new_line != line {
+                    report.changed += 1;
+                }
+                out.push_str(&new_line);
+                out.push('\n');
+            }
+            Err(_) => {
+                report.skipped += 1;
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+
+    // Atomic replace.
+    write_atomic(path, out.as_bytes()).await?;
+    #[cfg(unix)]
+    set_mode(path, 0o600)?;
+    Ok(report)
+}
+
 /// List known session ids (stem of `.jsonl` files).
 pub async fn list_sessions() -> Result<Vec<SessionId>, MemError> {
     let dir = sessions_dir();
@@ -564,6 +638,95 @@ mod tests {
         // Line 2 is the message line (header is line 1).
         let got_line = got_raw.lines().nth(1).unwrap();
         assert_eq!(got_line, want_line);
+    }
+
+    #[tokio::test]
+    async fn redact_file_rewrites_legacy_plaintext_secret() {
+        // Simulate a pre-redaction session: write the JSONL by hand with a
+        // secret embedded, then run `redact_file` and confirm the secret is
+        // gone + the header stays intact + line order is preserved.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacy.jsonl");
+
+        let header = SessionHeader::new(SessionId::new("legacy-1"), "claude-opus-4-7");
+        let secret = "ghp_0123456789ABCDEFGHIJ0123456789abcdef";
+        let msg = Message::user(format!("here is my pat {secret} thanks"));
+        let meta = Meta {
+            event: "env_dump".into(),
+            detail: serde_json::json!({"GITHUB_TOKEN": secret}),
+        };
+
+        // Write the file *without* going through append() — no redaction.
+        let mut raw = serde_json::to_string(&header).unwrap();
+        raw.push('\n');
+        raw.push_str(&serde_json::to_string(&Record::Message(msg)).unwrap());
+        raw.push('\n');
+        raw.push_str(&serde_json::to_string(&Record::Meta(meta)).unwrap());
+        raw.push('\n');
+        tokio::fs::write(&path, raw).await.unwrap();
+
+        // Sanity — the plaintext is really there before migration.
+        let pre = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(pre.contains(secret), "test setup: secret should be present");
+
+        let report = redact_file(&path).await.unwrap();
+        assert_eq!(report.scanned, 2);
+        assert_eq!(report.changed, 2);
+        assert_eq!(report.skipped, 0);
+
+        let post = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(!post.contains(secret), "secret leaked after redact: {post}");
+        assert!(post.contains("[REDACTED:github_pat]"));
+
+        // Header preserved verbatim.
+        let first = post.lines().next().unwrap();
+        assert!(first.contains("\"schema\":\"harness.session\""));
+
+        // `load()` still parses cleanly after rewrite.
+        let loaded = load(&path).await.unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn redact_file_idempotent_on_clean_session() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("clean.jsonl");
+        let id = SessionId::new("clean-1");
+        let header = SessionHeader::new(id, "claude-opus-4-7");
+        init(&path, &header).await.unwrap();
+        append(&path, &Record::Message(Message::user("nothing sensitive")))
+            .await
+            .unwrap();
+
+        let pre = tokio::fs::read(&path).await.unwrap();
+        let report = redact_file(&path).await.unwrap();
+        let post = tokio::fs::read(&path).await.unwrap();
+
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.changed, 0);
+        assert_eq!(pre, post, "idempotent rewrite should be byte-stable");
+    }
+
+    #[tokio::test]
+    async fn redact_file_skips_unparseable_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("garbled.jsonl");
+        let header = SessionHeader::new(SessionId::new("garble"), "claude-opus-4-7");
+
+        let mut raw = serde_json::to_string(&header).unwrap();
+        raw.push('\n');
+        raw.push_str("this is not json at all\n");
+        raw.push_str(&serde_json::to_string(&Record::Message(Message::user("ok"))).unwrap());
+        raw.push('\n');
+        tokio::fs::write(&path, raw).await.unwrap();
+
+        let report = redact_file(&path).await.unwrap();
+        assert_eq!(report.scanned, 2);
+        assert_eq!(report.skipped, 1);
+
+        // Garbled line still present — redactor did not drop it.
+        let post = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(post.contains("this is not json at all"));
     }
 
     #[tokio::test]

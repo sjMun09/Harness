@@ -222,6 +222,20 @@ enum SessionCmd {
     },
     /// Show session metadata + transcript head.
     Show { id: String },
+    /// Redact secrets from existing session JSONL files in-place.
+    ///
+    /// Per-append redaction shipped after older sessions were written, so
+    /// their transcripts still contain plaintext API keys / tokens. This
+    /// subcommand rewrites every affected line atomically (tmp + rename);
+    /// re-running is idempotent.
+    Redact {
+        /// Specific session id to rewrite. Omit to process every file under
+        /// the sessions directory.
+        id: Option<String>,
+        /// Parse files but do not rewrite — print what *would* change.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -341,6 +355,7 @@ async fn main() -> ExitCode {
                 Err(e) => Err(e),
             },
             SessionCmd::Show { id } => cmd_session_show(id).await,
+            SessionCmd::Redact { id, dry_run } => cmd_session_redact(id, dry_run).await,
         },
         Cmd::Config(c) => match c {
             ConfigCmd::Import => cmd_config_import().await,
@@ -1348,6 +1363,117 @@ async fn cmd_session_show(id: String) -> anyhow::Result<SessionExit> {
         );
     }
     Ok(SessionExit::Ok)
+}
+
+/// Migrate pre-redaction session files — rewrite in place with secrets
+/// replaced by `[REDACTED:<kind>]` markers. Default scope is every file
+/// under `$XDG_STATE_HOME/harness/sessions/`; pass an `id` to target one.
+async fn cmd_session_redact(id: Option<String>, dry_run: bool) -> anyhow::Result<SessionExit> {
+    let targets: Vec<PathBuf> = match id {
+        Some(one) => vec![harness_mem::session_path(&SessionId::new(one))],
+        None => harness_mem::list_sessions()
+            .await
+            .context("list sessions")?
+            .into_iter()
+            .map(|sid| harness_mem::session_path(&sid))
+            .collect(),
+    };
+
+    if targets.is_empty() {
+        eprintln!(
+            "no sessions under {}",
+            harness_mem::sessions_dir().display()
+        );
+        return Ok(SessionExit::Ok);
+    }
+
+    let mut total_scanned = 0usize;
+    let mut total_changed = 0usize;
+    let mut total_skipped = 0usize;
+    let mut failures: Vec<(PathBuf, String)> = Vec::new();
+
+    for path in &targets {
+        if dry_run {
+            // Dry-run path: read + parse + diff, but do not rewrite.
+            match dry_run_one(path).await {
+                Ok((scanned, changed, skipped)) => {
+                    total_scanned += scanned;
+                    total_changed += changed;
+                    total_skipped += skipped;
+                    println!(
+                        "{}: scanned={scanned} would_change={changed} skipped={skipped}",
+                        path.display()
+                    );
+                }
+                Err(e) => failures.push((path.clone(), e.to_string())),
+            }
+        } else {
+            match harness_mem::redact_file(path).await {
+                Ok(r) => {
+                    total_scanned += r.scanned;
+                    total_changed += r.changed;
+                    total_skipped += r.skipped;
+                    println!(
+                        "{}: scanned={} changed={} skipped={}",
+                        path.display(),
+                        r.scanned,
+                        r.changed,
+                        r.skipped
+                    );
+                }
+                Err(e) => failures.push((path.clone(), e.to_string())),
+            }
+        }
+    }
+
+    eprintln!(
+        "{} {} file(s): scanned={total_scanned} {}={total_changed} skipped={total_skipped}{}",
+        if dry_run { "dry-run over" } else { "redacted" },
+        targets.len(),
+        if dry_run { "would_change" } else { "changed" },
+        if failures.is_empty() {
+            String::new()
+        } else {
+            format!(" failures={}", failures.len())
+        }
+    );
+    if !failures.is_empty() {
+        for (p, err) in &failures {
+            eprintln!("  {}: {err}", p.display());
+        }
+        anyhow::bail!("{} file(s) failed during redaction pass", failures.len());
+    }
+    Ok(SessionExit::Ok)
+}
+
+/// Dry-run helper: parse every record + redact in memory to count the
+/// diff, but never touch the original file.
+async fn dry_run_one(path: &Path) -> anyhow::Result<(usize, usize, usize)> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("read {}", path.display()))?;
+    let text = std::str::from_utf8(&bytes).with_context(|| format!("utf8 {}", path.display()))?;
+    let mut lines = text.split('\n').filter(|l| !l.is_empty());
+    // Header line — ignored by redact_file + dry-run alike.
+    lines.next();
+
+    let mut scanned = 0usize;
+    let mut changed = 0usize;
+    let mut skipped = 0usize;
+    for line in lines {
+        scanned += 1;
+        match serde_json::from_str::<harness_mem::Record>(line) {
+            Ok(mut rec) => {
+                harness_mem::redact_record(&mut rec);
+                let new_line = serde_json::to_string(&rec)?;
+                if new_line != line {
+                    changed += 1;
+                }
+            }
+            Err(_) => skipped += 1,
+        }
+    }
+    Ok((scanned, changed, skipped))
 }
 
 fn head(s: &str, n: usize) -> String {
