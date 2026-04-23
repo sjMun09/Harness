@@ -613,6 +613,14 @@ async fn consume_stream(
             }
             StreamEvent::MessageStop => break,
             StreamEvent::Ping => {}
+            StreamEvent::Error(msg) => {
+                // Anthropic mid-stream `event: error` frames are terminal.
+                // Previously mapped to Ping, causing the engine to hang
+                // waiting for a MessageStop that would never arrive.
+                return Err(DriveErr::Provider(ProviderError::Transport(format!(
+                    "provider stream error: {msg}"
+                ))));
+            }
         }
     }
     Ok(ConsumeOutcome::Completed(acc))

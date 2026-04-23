@@ -63,6 +63,11 @@ pub enum StreamEvent {
     MessageStop,
     /// Keep-alive — turn loop ignores.
     Ping,
+    /// Mid-stream provider-reported error (Anthropic SSE `event: error`).
+    /// The turn loop treats this as terminal and surfaces the message to the
+    /// caller — previously this was silently mapped to `Ping`, which caused
+    /// the engine to hang waiting for a `MessageStop` that would never arrive.
+    Error(String),
 }
 
 #[derive(Debug, Clone)]
