@@ -502,7 +502,8 @@ async fn dispatch_tool_uses(
     tool_uses: &[(String, String, Value)],
     event_sink: &Option<EventSink>,
 ) -> Vec<ContentBlock> {
-    let mut out = Vec::with_capacity(tool_uses.len());
+    // Phase 1: emit ToolCallStart for every call in input order so the line
+    // renderer shows consistent "entering" banners before any call resolves.
     for (id, name, input) in tool_uses {
         let preview = tool_map
             .get(name)
@@ -516,8 +517,26 @@ async fn dispatch_tool_uses(
                 preview,
             },
         );
-        let result = dispatch_one(tool_map, ctx, plan_gate, id, name, input.clone()).await;
-        let (ok, head) = tool_result_to_head(&result);
+    }
+
+    // Phase 2: dispatch every tool_use concurrently via `join_all`. Each child
+    // sees its own grandchild cancel token (PLAN §2.2) so cancel propagates
+    // from the turn-level token without a tool being able to cancel a sibling.
+    let futures = tool_uses.iter().map(|(id, name, input)| {
+        let child_ctx = ctx.with_cancel(child_cancel(&ctx.cancel));
+        let id = id.clone();
+        let name = name.clone();
+        let input = input.clone();
+        async move {
+            dispatch_one(tool_map, &child_ctx, plan_gate, &id, &name, input).await
+        }
+    });
+    let results: Vec<ContentBlock> = futures_util::future::join_all(futures).await;
+
+    // Phase 3: emit ToolCallEnd in the original input order (results are
+    // index-aligned with `tool_uses`).
+    for ((id, name, _), result) in tool_uses.iter().zip(results.iter()) {
+        let (ok, head) = tool_result_to_head(result);
         emit(
             event_sink,
             TurnEvent::ToolCallEnd {
@@ -527,9 +546,9 @@ async fn dispatch_tool_uses(
                 summary_head: head,
             },
         );
-        out.push(result);
     }
-    out
+
+    results
 }
 
 /// Extract `(ok, first_non_empty_line)` from a `ContentBlock::ToolResult`.
@@ -1200,5 +1219,184 @@ mod tests {
         assert!(!grand.is_cancelled());
         parent.cancel();
         assert!(grand.is_cancelled());
+    }
+
+    /// Parallel dispatch contract: several tool_use blocks in a single
+    /// assistant turn are issued concurrently (wall-clock faster than the
+    /// sequential sum of their sleeps) but the returned ToolResults keep the
+    /// original input order (1:1 tool_use_id correspondence).
+    #[tokio::test]
+    async fn parallel_tool_dispatch_preserves_order_and_runs_concurrently() {
+        use std::time::Duration;
+        use tokio::time::Instant;
+
+        /// Sleeps for `delay_ms` then echoes its `tag`. Each call writes a
+        /// `start` timestamp into a shared vec so the test can verify the
+        /// calls overlap in time.
+        struct SleepEcho {
+            tag: &'static str,
+            delay_ms: u64,
+            starts: Arc<Mutex<Vec<(String, Instant)>>>,
+        }
+        #[async_trait]
+        impl Tool for SleepEcho {
+            fn name(&self) -> &str {
+                self.tag
+            }
+            fn description(&self) -> &'static str {
+                "sleep-echo test tool"
+            }
+            fn schema(&self) -> Value {
+                json!({"type":"object"})
+            }
+            fn preview(&self, _input: &Value) -> crate::tool::Preview {
+                crate::tool::Preview {
+                    summary_line: self.tag.into(),
+                    detail: None,
+                }
+            }
+            async fn call(&self, _input: Value, _ctx: ToolCtx) -> Result<ToolOutput, ToolError> {
+                self.starts
+                    .lock()
+                    .unwrap()
+                    .push((self.tag.to_string(), Instant::now()));
+                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+                Ok(ToolOutput {
+                    summary: format!("done:{}", self.tag),
+                    detail_path: None,
+                    stream: None,
+                })
+            }
+        }
+
+        let starts: Arc<Mutex<Vec<(String, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(SleepEcho {
+                tag: "A",
+                delay_ms: 120,
+                starts: starts.clone(),
+            }) as Arc<dyn Tool>,
+            Arc::new(SleepEcho {
+                tag: "B",
+                delay_ms: 120,
+                starts: starts.clone(),
+            }),
+            Arc::new(SleepEcho {
+                tag: "C",
+                delay_ms: 120,
+                starts: starts.clone(),
+            }),
+        ];
+
+        // Assistant turn producing three tool_use blocks A, B, C in that order.
+        let mk_use = |index: usize, name: &str, id: &str| {
+            vec![
+                StreamEvent::ContentBlockStart {
+                    index,
+                    block: ContentBlockHeader::ToolUse {
+                        id: id.into(),
+                        name: name.into(),
+                    },
+                },
+                StreamEvent::ContentBlockDelta {
+                    index,
+                    delta: crate::provider::ContentDelta::InputJson("{}".into()),
+                },
+                StreamEvent::ContentBlockStop { index },
+            ]
+        };
+        let mut call_turn = vec![StreamEvent::MessageStart {
+            message_id: "m".into(),
+            usage: Usage::default(),
+        }];
+        call_turn.extend(mk_use(0, "A", "tu_a"));
+        call_turn.extend(mk_use(1, "B", "tu_b"));
+        call_turn.extend(mk_use(2, "C", "tu_c"));
+        call_turn.push(StreamEvent::MessageDelta {
+            stop_reason: Some(StopReason::ToolUse),
+            usage: Usage::default(),
+        });
+        call_turn.push(StreamEvent::MessageStop);
+
+        let stop_turn = vec![
+            StreamEvent::MessageStart {
+                message_id: "m".into(),
+                usage: Usage::default(),
+            },
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                block: ContentBlockHeader::Text,
+            },
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::provider::ContentDelta::Text("done".into()),
+            },
+            StreamEvent::ContentBlockStop { index: 0 },
+            StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage: Usage::default(),
+            },
+            StreamEvent::MessageStop,
+        ];
+        let provider = mk_provider(vec![call_turn, stop_turn]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = mk_ctx(dir.path());
+        ctx.permission = PermissionSnapshot::new(
+            vec![],
+            vec![
+                harness_perm::Rule::parse("A").unwrap(),
+                harness_perm::Rule::parse("B").unwrap(),
+                harness_perm::Rule::parse("C").unwrap(),
+            ],
+            vec![],
+        );
+
+        let wall_start = Instant::now();
+        let msgs = run_turn(
+            EngineInputs {
+                provider,
+                tools,
+                system: "sys".into(),
+                ctx,
+                max_turns: 3,
+                plan_gate: PlanGateState::default(),
+                event_sink: None,
+                cancel: None,
+            },
+            vec![Message::user("go")],
+        )
+        .await
+        .unwrap();
+        let elapsed = wall_start.elapsed();
+
+        // Concurrency: with three 120 ms sleeps, a sequential loop would
+        // take >= 360 ms. Parallel dispatch should finish well under that —
+        // we accept anything under 280 ms (leaves headroom for slow CI).
+        assert!(
+            elapsed < Duration::from_millis(280),
+            "expected parallel dispatch (<280ms), took {elapsed:?}"
+        );
+
+        // Order: the single user+tool_results message must carry A,B,C in
+        // input order (1:1 with the tool_use blocks).
+        let tool_results_msg = msgs
+            .iter()
+            .find(|m| {
+                m.role == Role::User
+                    && m.content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            })
+            .expect("tool_results message");
+        let ids: Vec<&str> = tool_results_msg
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["tu_a", "tu_b", "tu_c"]);
     }
 }
