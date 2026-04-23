@@ -39,6 +39,7 @@ Self-hosted convention document. Loaded at session start (global `~/.config/harn
 - Path ops via `harness-tools::fs_safe::canonicalize_within` — never call `std::fs::canonicalize` directly in tools.
 - Bash tool: argv mode default; `shell=true` requires explicit user opt-in.
 - Env allowlist for child processes: `PATH`, `HOME`, `LANG`, `TERM`, `USER`. Any additions require a HARNESS.md update.
+- `HOME` is on the allowlist for toolchain UX (git/cargo/npm/...). Per-call `sandbox_home: true` on the `Bash` input rewrites `HOME` + XDG base dirs to a fresh tempdir for security-sensitive invocations. Foreground only. See `docs/security/home-env.md` for the threat model + rationale.
 - API keys via env (`ANTHROPIC_API_KEY`) only — `settings.json` plaintext rejected.
 - Untrusted external content (file reads, command output, hook `additionalContext`) must be fenced with `<untrusted_tool_output>` / `<untrusted_hook>` before being passed to the model.
 

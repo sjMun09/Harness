@@ -152,6 +152,17 @@ pub struct BashInput {
     /// also satisfies the gate for headless / CI runs.
     #[serde(default)]
     pub allow_shell_mode: bool,
+    /// Per-call opt-in HOME sandbox. When `true`, the tool creates a fresh
+    /// per-call `TempDir` and rewrites `HOME` + the XDG base-dir variables
+    /// (`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`)
+    /// in the child env so a model-issued `cat ~/.ssh/id_rsa` (etc.) cannot
+    /// reach the real user's dotfiles. Defense-in-depth — the primary gate
+    /// is still the Ask/Allow rules for `Bash(...)`. Foreground calls only;
+    /// `run_in_background: true` + `sandbox_home: true` is rejected as
+    /// Validation (tempdir lifetime vs. bg drainer). See
+    /// `docs/security/home-env.md` for the rationale.
+    #[serde(default)]
+    pub sandbox_home: bool,
 }
 
 #[derive(Debug, Default)]
@@ -180,6 +191,11 @@ impl Tool for BashTool {
                     "type": "boolean",
                     "default": false,
                     "description": "Required when mode='shell'. Declare intent per-call so the operator's Ask prompt can audit shell composition (pipes, redirects, compound commands)."
+                },
+                "sandbox_home": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Opt-in HOME sandbox — rewrite $HOME (and XDG_*_HOME) to a fresh per-call tempdir so the child cannot reach ~/.ssh, ~/.aws, ~/.config/gh, dotfile credentials, etc. Foreground only."
                 }
             },
             "required": ["command"]
@@ -216,6 +232,17 @@ impl Tool for BashTool {
             return Err(shell_mode_denied_error());
         }
 
+        // HOME sandbox is foreground-only — a tempdir must outlive the
+        // child, and threading that lifetime through the bg drainer /
+        // registry would expand the diff well past defense-in-depth scope.
+        if bi.sandbox_home && bi.run_in_background {
+            return Err(ToolError::Validation(
+                "`sandbox_home: true` is not supported with `run_in_background: true`. \
+                 Run the command in the foreground, or omit sandbox_home."
+                    .into(),
+            ));
+        }
+
         if bi.run_in_background {
             return spawn_background(bi, ctx).await;
         }
@@ -235,6 +262,16 @@ impl Tool for BashTool {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         scrub_env(&mut cmd);
+        // Keep the guard bound until the child exits — `TempDir::drop`
+        // recursively removes the sandbox directory, so letting it drop
+        // before `child.wait()` would yank HOME out from under a live
+        // process. The `_` prefix silences unused-var warnings in the
+        // sandbox-off path without dropping the value.
+        let _home_sandbox = if bi.sandbox_home {
+            Some(apply_home_sandbox(&mut cmd).map_err(ToolError::Io)?)
+        } else {
+            None
+        };
         set_new_pgid(&mut cmd);
 
         let mut child = cmd.spawn().map_err(ToolError::Io)?;
@@ -331,6 +368,37 @@ fn scrub_env(cmd: &mut Command) {
             cmd.env(k, v);
         }
     }
+}
+
+/// Env vars that should be redirected into the HOME sandbox when
+/// `sandbox_home: true`. Covers `HOME` itself plus the XDG base-dir
+/// variables that `DEFAULT_ENV_ALLOW` also forwards — if we rewrote `HOME`
+/// but left `XDG_CONFIG_HOME=/Users/<me>/.config` untouched, the child
+/// could still read `~/.config/gh/hosts.yml` through XDG discovery.
+const SANDBOXED_HOME_VARS: &[&str] = &[
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+];
+
+/// Build a fresh `TempDir` and point `cmd`'s `HOME` (+ XDG base dirs) at
+/// it. Callers must keep the returned guard in scope until the spawned
+/// child exits — `TempDir::drop` unlinks the directory recursively, which
+/// would yank the sandbox out from under a live process.
+///
+/// Assumes `scrub_env` has already populated the child env: this call
+/// overrides the allowlisted values rather than re-building the env.
+fn apply_home_sandbox(cmd: &mut Command) -> std::io::Result<tempfile::TempDir> {
+    let dir = tempfile::Builder::new()
+        .prefix("harness-bash-home-")
+        .tempdir()?;
+    let path = dir.path();
+    for k in SANDBOXED_HOME_VARS {
+        cmd.env(k, path);
+    }
+    Ok(dir)
 }
 
 #[cfg(unix)]
@@ -834,6 +902,191 @@ mod tests {
             .await
             .expect("argv mode must work with shell gate closed");
         assert!(out.summary.contains("argv-ok"));
+    }
+
+    /// `HOME` mutation races the same way as the shell-mode env var —
+    /// serialize via a mutex so parallel tests don't step on each other.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct HomeGuard {
+        prev: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl HomeGuard {
+        fn set(new_home: &Path) -> Self {
+            let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("HOME");
+            std::env::set_var("HOME", new_home);
+            Self { prev, _lock: lock }
+        }
+    }
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    /// Sandbox off (default): the child observes the real `$HOME`. Keeping
+    /// `$HOME` on the allowlist is the whole point of the "opt-in" framing —
+    /// if this flips silently, most dev toolchains (git global config, cargo,
+    /// npm, ...) would break.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sandbox_home_off_passes_real_home_through() {
+        let _shell = ShellEnvGuard::allow();
+        let real_home = tempdir().unwrap();
+        let _h = HomeGuard::set(real_home.path());
+        let dir = tempdir().unwrap();
+        let out = BashTool
+            .call(
+                serde_json::json!({
+                    "command": "sh -c 'echo $HOME'",
+                    "mode": "shell",
+                }),
+                ctx(dir.path()),
+            )
+            .await
+            .expect("sandbox-off should run");
+        // Child must print the real HOME that the parent had set.
+        let needle = real_home.path().to_string_lossy().into_owned();
+        assert!(
+            out.summary.contains(needle.as_str()),
+            "expected child HOME={needle}, got: {}",
+            out.summary
+        );
+    }
+
+    /// Sandbox on: the child sees a fresh tempdir for `$HOME` — different
+    /// from the parent's `$HOME` — and `~/.ssh` under that tempdir contains
+    /// nothing. The "nothing found" assertion is the crux: a model-issued
+    /// `cat ~/.ssh/id_rsa` becomes a deterministic miss.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sandbox_home_on_rewrites_home_to_tempdir() {
+        let _shell = ShellEnvGuard::allow();
+        // Pretend the real user has a populated ~/.ssh — the sandbox must
+        // mask this from the child.
+        let real_home = tempdir().unwrap();
+        let real_ssh = real_home.path().join(".ssh");
+        std::fs::create_dir_all(&real_ssh).unwrap();
+        std::fs::write(
+            real_ssh.join("id_rsa"),
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        let _h = HomeGuard::set(real_home.path());
+        let dir = tempdir().unwrap();
+
+        let out = BashTool
+            .call(
+                serde_json::json!({
+                    "command": "sh -c 'echo HOME=$HOME; ls -A $HOME/.ssh 2>/dev/null | wc -l'",
+                    "mode": "shell",
+                    "sandbox_home": true,
+                }),
+                ctx(dir.path()),
+            )
+            .await
+            .expect("sandbox-on should run");
+
+        // Child HOME must NOT be the real one.
+        let real = real_home.path().to_string_lossy().into_owned();
+        let home_line = out
+            .summary
+            .lines()
+            .find(|l| l.starts_with("HOME="))
+            .expect("expected HOME= line in output");
+        assert!(
+            !home_line.contains(real.as_str()),
+            "sandbox leaked real HOME: {home_line}"
+        );
+        // Child HOME must be a tempdir path (macOS wraps TMPDIR, Linux
+        // typically /tmp — accept either `/var/folders/` or `/tmp/`).
+        assert!(
+            home_line.contains("harness-bash-home-"),
+            "HOME does not point at the sandbox prefix: {home_line}"
+        );
+        // `ls ~/.ssh` inside the child must find zero entries. `wc -l`
+        // pads its output with whitespace on BSD and strips it on GNU;
+        // normalize by trimming whitespace before checking.
+        let wc_line = out
+            .summary
+            .lines()
+            .filter_map(|l| l.trim().parse::<u32>().ok())
+            .next()
+            .expect("expected a numeric wc -l line in output");
+        assert_eq!(
+            wc_line, 0,
+            "expected empty .ssh listing, got count {wc_line}: {}",
+            out.summary
+        );
+    }
+
+    /// `sandbox_home: true` + `run_in_background: true` must be rejected
+    /// up-front — the tempdir lifetime is tied to the foreground call and
+    /// silently ignoring the flag in bg mode would be a worse bug than the
+    /// one this flag is defending against.
+    #[tokio::test]
+    async fn sandbox_home_rejected_with_run_in_background() {
+        let dir = tempdir().unwrap();
+        let err = BashTool
+            .call(
+                serde_json::json!({
+                    "command": "echo hi",
+                    "sandbox_home": true,
+                    "run_in_background": true,
+                }),
+                ctx(dir.path()),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::Validation(msg) => {
+                assert!(
+                    msg.contains("sandbox_home") && msg.contains("background"),
+                    "error must name both flags: {msg}"
+                );
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    /// Argv mode must also honor the sandbox — many real commands (`git`,
+    /// `cargo`) go through argv, so shell-only protection would be a gap.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sandbox_home_works_in_argv_mode() {
+        let _shell = ShellEnvGuard::deny();
+        let real_home = tempdir().unwrap();
+        let _h = HomeGuard::set(real_home.path());
+        let dir = tempdir().unwrap();
+
+        // `printenv HOME` — pure argv, no shell.
+        let out = BashTool
+            .call(
+                serde_json::json!({
+                    "command": "printenv HOME",
+                    "sandbox_home": true,
+                }),
+                ctx(dir.path()),
+            )
+            .await
+            .expect("argv-mode sandbox should run");
+
+        let real = real_home.path().to_string_lossy().into_owned();
+        assert!(
+            !out.summary.contains(real.as_str()),
+            "argv-mode sandbox leaked real HOME: {}",
+            out.summary
+        );
+        assert!(
+            out.summary.contains("harness-bash-home-"),
+            "argv-mode HOME does not point at sandbox prefix: {}",
+            out.summary
+        );
     }
 
     #[cfg(unix)]
