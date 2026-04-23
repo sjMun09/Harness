@@ -961,6 +961,7 @@ dependencies = [
  "futures-util",
  "harness-core",
  "harness-proto",
+ "regex",
  "reqwest",
  "secrecy",
  "serde",

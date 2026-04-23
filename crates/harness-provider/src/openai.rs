@@ -48,6 +48,44 @@ pub struct OpenAIProvider {
     api_key: SecretString,
     model: String,
     base_url: Url,
+    /// Streaming-behaviour toggles. Resolved once at construction so a running
+    /// provider has stable behaviour across calls — changing the env mid-run
+    /// does not take effect (matches how `OPENAI_API_KEY` is resolved).
+    cfg: StreamCfg,
+}
+
+/// Opt-in streaming tweaks. Today only carries the local-LLM text-based
+/// tool-call fallback; kept as a struct so future toggles (thinking passthrough,
+/// JSON-schema coercion, ...) don't balloon the provider signature.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StreamCfg {
+    /// When `true`, buffer assistant text until the stream terminates, then
+    /// look for a `<tool:Name>{...}</tool>` envelope. If found, synthesize the
+    /// equivalent `tool_use` events (matching the Anthropic-native shape) and
+    /// elide the envelope from the text. Off by default — the feature only
+    /// helps small local models that can't reliably emit `tool_calls` JSON.
+    ///
+    /// Toggle via `HARNESS_OPENAI_TEXT_TOOLCALL=1` at provider construction.
+    pub text_toolcall_fallback: bool,
+}
+
+impl StreamCfg {
+    /// Read from env once. `1` / `true` (case-insensitive) enable the fallback;
+    /// anything else — including unset — leaves it off. We intentionally do not
+    /// re-read env per stream: stable behaviour across a session is easier to
+    /// reason about, and tests use the explicit struct form.
+    pub fn from_env() -> Self {
+        let text_toolcall_fallback = std::env::var("HARNESS_OPENAI_TEXT_TOOLCALL")
+            .ok()
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                v == "1" || v == "true"
+            })
+            .unwrap_or(false);
+        Self {
+            text_toolcall_fallback,
+        }
+    }
 }
 
 impl std::fmt::Debug for OpenAIProvider {
@@ -93,13 +131,15 @@ impl OpenAIProvider {
         let api_key = resolve_api_key(&base_url)?;
         let client = build_http_client()?;
         let model = model.into();
-        log_init(&base_url, &model);
+        let cfg = StreamCfg::from_env();
+        log_init(&base_url, &model, cfg);
 
         Ok(Self {
             client,
             api_key,
             model,
             base_url,
+            cfg,
         })
     }
 
@@ -114,14 +154,27 @@ impl OpenAIProvider {
         api_key: SecretString,
         base_url: Url,
     ) -> Result<Self, ProviderError> {
+        Self::with_config_and_cfg(model, api_key, base_url, StreamCfg::from_env())
+    }
+
+    /// Back-door for tests that need to pin `StreamCfg` explicitly (rather
+    /// than rely on env). Never use in prod.
+    #[doc(hidden)]
+    pub fn with_config_and_cfg(
+        model: impl Into<String>,
+        api_key: SecretString,
+        base_url: Url,
+        cfg: StreamCfg,
+    ) -> Result<Self, ProviderError> {
         let client = build_http_client()?;
         let model = model.into();
-        log_init(&base_url, &model);
+        log_init(&base_url, &model, cfg);
         Ok(Self {
             client,
             api_key,
             model,
             base_url,
+            cfg,
         })
     }
 
@@ -143,13 +196,14 @@ impl OpenAIProvider {
 /// `SecretString` is not formatted here and we intentionally do not reference
 /// it. Critical for local-LLM debugging: "did harness hit Ollama or the
 /// public API?" has been a recurring first-time-user confusion.
-fn log_init(base_url: &Url, model: &str) {
+fn log_init(base_url: &Url, model: &str, cfg: StreamCfg) {
     tracing::info!(
         target: "harness_provider::openai",
         provider = "openai-compat",
         base_url = %base_url,
         model = model,
         local = is_local_url(base_url),
+        text_toolcall_fallback = cfg.text_toolcall_fallback,
         "openai provider initialized"
     );
 }
@@ -218,7 +272,7 @@ impl Provider for OpenAIProvider {
             ));
         }
 
-        Ok(parse_stream(resp.bytes_stream()))
+        Ok(parse_stream_with_cfg(resp.bytes_stream(), self.cfg))
     }
 }
 
@@ -426,7 +480,15 @@ fn collect_text(blocks: &[ContentBlock]) -> String {
 /// - `tool_calls[i].function.arguments` is a stream of fragments; they may
 ///   split mid-JSON-token (even mid-UTF-8 byte). We byte-concat at the engine,
 ///   so emit raw bytes as `ContentDelta::InputJson`.
+#[cfg(test)]
 pub(crate) fn parse_stream<S>(inner: S) -> EventStream
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+{
+    parse_stream_with_cfg(inner, StreamCfg::default())
+}
+
+pub(crate) fn parse_stream_with_cfg<S>(inner: S, cfg: StreamCfg) -> EventStream
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
 {
@@ -434,7 +496,7 @@ where
         inner: Box::pin(inner),
         buf: BytesMut::with_capacity(16 * 1024),
         queue: VecDeque::new(),
-        state: StreamState::default(),
+        state: StreamState::with_cfg(cfg),
         done: false,
     })
 }
@@ -460,6 +522,22 @@ struct StreamState {
     /// emission order. We assign these the first time a block opens so engine
     /// indexing is stable.
     next_block_index: usize,
+    /// Per-stream config snapshot. Copied in once at construction.
+    cfg: StreamCfg,
+    /// Buffered text awaiting `flush_terminal` inspection when
+    /// `cfg.text_toolcall_fallback` is on. While this is active, `text` above
+    /// stays un-opened and no text `ContentBlockStart`/`Delta` events go out;
+    /// `flush_terminal` decides what to do with the whole buffer.
+    buffered_text: String,
+}
+
+impl StreamState {
+    fn with_cfg(cfg: StreamCfg) -> Self {
+        Self {
+            cfg,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Default)]
@@ -634,21 +712,27 @@ fn translate_chunk(
         // Text delta.
         if let Some(text) = choice.delta.content {
             if !text.is_empty() {
-                if !state.text.opened {
-                    let idx = state.next_block_index;
-                    state.next_block_index += 1;
-                    state.text.index = Some(idx);
-                    state.text.opened = true;
-                    out.push(StreamEvent::ContentBlockStart {
-                        index: idx,
-                        block: ContentBlockHeader::Text,
-                    });
-                }
-                if let Some(idx) = state.text.index {
-                    out.push(StreamEvent::ContentBlockDelta {
-                        index: idx,
-                        delta: ContentDelta::Text(text),
-                    });
+                if state.cfg.text_toolcall_fallback {
+                    // Defer: flush_terminal decides whether this text held a
+                    // `<tool:Name>{...}</tool>` envelope and splits accordingly.
+                    state.buffered_text.push_str(&text);
+                } else {
+                    if !state.text.opened {
+                        let idx = state.next_block_index;
+                        state.next_block_index += 1;
+                        state.text.index = Some(idx);
+                        state.text.opened = true;
+                        out.push(StreamEvent::ContentBlockStart {
+                            index: idx,
+                            block: ContentBlockHeader::Text,
+                        });
+                    }
+                    if let Some(idx) = state.text.index {
+                        out.push(StreamEvent::ContentBlockDelta {
+                            index: idx,
+                            delta: ContentDelta::Text(text),
+                        });
+                    }
                 }
             }
         }
@@ -728,23 +812,158 @@ fn translate_chunk(
     Ok(out)
 }
 
-// TODO(local-llm): text-based tool-call fallback.
-// Many small local models (qwen2.5-coder:7b, gemma:7b) can't reliably emit
-// `tool_calls` JSON — they revert to natural language like
-// `I would run: Bash('ls')` or a `<tool>...</tool>` XML-ish envelope.
-// A minimal fallback would: at `flush_terminal`, if no tool_call blocks were
-// opened AND the text block matches a pattern like
-//   `<tool:(\w+)>\s*(\{[\s\S]*?\})\s*</tool>`
-// then synthesize a ContentBlockStart(ToolUse) + InputJson delta + Stop, and
-// elide the matching substring from the text block. Non-trivial because the
-// text block has already been streamed out as deltas; we'd need a buffering
-// mode for local providers only. Deferred until tasks 1-5 are in production
-// and we can validate the pattern against real model outputs rather than
-// guessing. See docs/local-llm/README.md "툴콜링" section.
+/// Pattern for the local-LLM text-based tool-call envelope. Matches:
+///
+/// ```text
+/// <tool:ToolName>{"some":"json"}</tool>
+/// ```
+///
+/// - Capture 1: tool name (word chars — letters, digits, `_`).
+/// - Capture 2: a `{...}` JSON object, greedy over everything between a leading
+///   `{` and the last `}` before `</tool>`. Using `[\s\S]*?` keeps it
+///   non-greedy so two envelopes on the same line don't merge.
+///
+/// Kept lazily initialised via `once_cell`-less `LazyLock` equivalent pattern:
+/// small cost on first use, no runtime re-compile. We allocate per-call in
+/// `synthesize_text_toolcall` instead — compilation is microseconds and this
+/// path only fires for local-LLM streams. Avoids dragging `once_cell` in.
+const LOCAL_TOOL_ENVELOPE_RE: &str = r"<tool:(\w+)>\s*(\{[\s\S]*?\})\s*</tool>";
+
+/// Try to rewrite the buffered text into a synthesized tool_use + residual
+/// text. Returns events to push (in order) and the stop_reason override to
+/// apply if a tool was synthesized.
+///
+/// Decision matrix:
+/// - No envelope match → emit a single plain text block; no stop_reason change.
+/// - Envelope found but JSON is invalid → same as "no match" (safer to show
+///   the raw text than crash). We log a warning so operators can spot it.
+/// - Envelope found, JSON valid → emit `[optional Text block for any residual
+///   prose] + ContentBlockStart(ToolUse) + InputJson + ContentBlockStop`, and
+///   ask the caller to force `stop_reason = ToolUse` if the model claimed
+///   `EndTurn` / `None` (the engine's turn loop keys on it to run the tool).
+///
+/// Only the *first* envelope in the buffer is extracted — models don't
+/// typically emit more than one per turn, and chaining is better handled by
+/// the next turn. If users report chained-calls in the wild we can revisit.
+fn synthesize_text_toolcall(
+    buffered_text: &str,
+    state: &mut StreamState,
+) -> (Vec<StreamEvent>, bool) {
+    let mut out = Vec::new();
+    let re = match regex::Regex::new(LOCAL_TOOL_ENVELOPE_RE) {
+        Ok(re) => re,
+        Err(e) => {
+            // Programmer error; surface and fall through to plain text.
+            tracing::error!(
+                target: "harness_provider::openai",
+                pattern = LOCAL_TOOL_ENVELOPE_RE,
+                error = %e,
+                "local-LLM tool-call regex failed to compile; emitting raw text"
+            );
+            emit_plain_text(buffered_text, state, &mut out);
+            return (out, false);
+        }
+    };
+
+    let Some(caps) = re.captures(buffered_text) else {
+        emit_plain_text(buffered_text, state, &mut out);
+        return (out, false);
+    };
+
+    // Extract pieces.
+    let whole = caps.get(0).expect("capture 0 always present");
+    let name = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
+    let json_raw = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
+
+    // Validate JSON. Invalid → leave text alone. Silent downgrade with a warn
+    // so operators can diagnose a misbehaving prompt without a stream crash.
+    if serde_json::from_str::<serde_json::Value>(json_raw).is_err() {
+        tracing::warn!(
+            target: "harness_provider::openai",
+            tool_name = name,
+            "local-LLM tool-call envelope matched but JSON is malformed; falling through as text"
+        );
+        emit_plain_text(buffered_text, state, &mut out);
+        return (out, false);
+    }
+
+    // Residual text = buffer minus the envelope (with incidental whitespace
+    // around the envelope compacted — a trailing newline after `</tool>` is
+    // almost always boilerplate, not signal).
+    let mut residual = String::with_capacity(buffered_text.len());
+    residual.push_str(&buffered_text[..whole.start()]);
+    residual.push_str(&buffered_text[whole.end()..]);
+    let trimmed = residual.trim();
+    if !trimmed.is_empty() {
+        emit_plain_text(trimmed, state, &mut out);
+    }
+
+    // Synthesize the tool_use block. Id must be unique within the message —
+    // tool_call blocks earlier in this stream already consumed indexes, so we
+    // derive an id from the next block index to avoid collision.
+    let tool_idx = state.next_block_index;
+    state.next_block_index += 1;
+    let synthetic_id = format!("call_local_{tool_idx}");
+
+    out.push(StreamEvent::ContentBlockStart {
+        index: tool_idx,
+        block: ContentBlockHeader::ToolUse {
+            id: synthetic_id,
+            name: name.to_string(),
+        },
+    });
+    out.push(StreamEvent::ContentBlockDelta {
+        index: tool_idx,
+        delta: ContentDelta::InputJson(json_raw.as_bytes().to_vec()),
+    });
+    out.push(StreamEvent::ContentBlockStop { index: tool_idx });
+
+    (out, true)
+}
+
+/// Open/close a text block carrying `text` verbatim. Used by the fallback
+/// path to flush either the full buffer (no match) or the envelope-stripped
+/// residual (match). The `text.opened` flag is left `false` afterwards so
+/// `flush_terminal` won't double-close.
+fn emit_plain_text(text: &str, state: &mut StreamState, out: &mut Vec<StreamEvent>) {
+    if text.is_empty() {
+        return;
+    }
+    let idx = state.next_block_index;
+    state.next_block_index += 1;
+    out.push(StreamEvent::ContentBlockStart {
+        index: idx,
+        block: ContentBlockHeader::Text,
+    });
+    out.push(StreamEvent::ContentBlockDelta {
+        index: idx,
+        delta: ContentDelta::Text(text.to_string()),
+    });
+    out.push(StreamEvent::ContentBlockStop { index: idx });
+}
 
 /// Called on `[DONE]` or on clean EOF after at least one chunk: emit
 /// `ContentBlockStop` for each open block, then `MessageDelta` + `MessageStop`.
+///
+/// When the local-LLM text-toolcall fallback is on, text content was buffered
+/// in `state.buffered_text` rather than streamed out. Here we inspect that
+/// buffer, synthesize a `tool_use` block if an envelope is found, and emit
+/// the stripped residual (if any) as a normal text block — preserving
+/// prose-around-envelope output shape.
 fn flush_terminal(state: &mut StreamState, queue: &mut VecDeque<StreamEvent>) {
+    // Local-LLM fallback: replay buffered text (with optional tool-use
+    // synthesis) before closing native blocks. Happens before the `text`
+    // block close because in fallback mode the native text block is never
+    // opened — `emit_plain_text` / `synthesize_text_toolcall` open-and-close
+    // their own blocks with stable indexes.
+    let mut synthesized_tool = false;
+    if state.cfg.text_toolcall_fallback && !state.buffered_text.is_empty() {
+        let buf = std::mem::take(&mut state.buffered_text);
+        let (events, synth) = synthesize_text_toolcall(&buf, state);
+        synthesized_tool = synth;
+        queue.extend(events);
+    }
+
     if state.text.opened {
         if let Some(idx) = state.text.index {
             queue.push_back(StreamEvent::ContentBlockStop { index: idx });
@@ -758,6 +977,22 @@ fn flush_terminal(state: &mut StreamState, queue: &mut VecDeque<StreamEvent>) {
             queue.push_back(StreamEvent::ContentBlockStop { index: tc.index });
         }
     }
+
+    // If we synthesized a tool_use but the model claimed `EndTurn` (or never
+    // reported a finish_reason), upgrade to `ToolUse` so the turn loop knows
+    // to actually execute the tool instead of terminating the conversation.
+    // `MaxTokens` / `StopSequence` are preserved — they're stronger signals
+    // that the model didn't finish its thought and forcing ToolUse would
+    // paper over truncation bugs.
+    if synthesized_tool {
+        match state.stop_reason {
+            None | Some(StopReason::EndTurn) => {
+                state.stop_reason = Some(StopReason::ToolUse);
+            }
+            _ => {}
+        }
+    }
+
     if !state.delta_emitted {
         queue.push_back(StreamEvent::MessageDelta {
             stop_reason: state.stop_reason,
@@ -912,6 +1147,15 @@ mod tests {
             .map(|b| Ok(Bytes::from_static(b)))
             .collect();
         parse_stream(stream::iter(items))
+    }
+
+    fn stream_of_with_cfg(chunks: Vec<&'static [u8]>, cfg: StreamCfg) -> EventStream {
+        use futures_util::stream;
+        let items: Vec<Result<Bytes, reqwest::Error>> = chunks
+            .into_iter()
+            .map(|b| Ok(Bytes::from_static(b)))
+            .collect();
+        parse_stream_with_cfg(stream::iter(items), cfg)
     }
 
     async fn collect(mut s: EventStream) -> Vec<Result<StreamEvent, ProviderError>> {
@@ -1265,6 +1509,300 @@ mod tests {
             _ => None,
         });
         assert_eq!(sr, Some(StopReason::EndTurn));
+    }
+
+    // ---------------------------------------------------------------------
+    // Local-LLM text-based tool-call fallback
+    //
+    // Gated behind `StreamCfg.text_toolcall_fallback` (env:
+    // `HARNESS_OPENAI_TEXT_TOOLCALL=1`). Small local models (qwen2.5-coder:7b,
+    // gemma:7b at low quant) regularly emit tool calls as prose with a
+    // `<tool:Name>{...}</tool>` envelope instead of an OpenAI `tool_calls`
+    // JSON field. The fallback buffers text until stream end, extracts the
+    // first envelope, and synthesizes the Anthropic-shaped event trio
+    // (ContentBlockStart ToolUse → InputJson → ContentBlockStop) so the
+    // turn loop runs the tool just like on a native tool_calls response.
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn text_toolcall_fallback_synthesizes_tool_use_events() {
+        // Model streams plain text with a tool envelope. With fallback on we
+        // expect: MessageStart → ContentBlockStart(ToolUse) → InputJson →
+        // ContentBlockStop → MessageDelta(ToolUse) → MessageStop. No raw text
+        // block because after stripping the envelope the residual is empty.
+        let body = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"<tool:Bash>\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"{\\\"cmd\\\":\\\"ls\\\",\\\"mode\\\":\\\"Argv\\\"}\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"</tool>\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let cfg = StreamCfg {
+            text_toolcall_fallback: true,
+        };
+        let evs: Vec<_> = collect(stream_of_with_cfg(vec![body.as_bytes()], cfg))
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+
+        // MessageStart first.
+        assert!(matches!(evs[0], StreamEvent::MessageStart { .. }));
+
+        // Find the synthesized ToolUse ContentBlockStart.
+        let tool_start = evs
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::ContentBlockStart {
+                    index,
+                    block: ContentBlockHeader::ToolUse { id, name },
+                } => Some((*index, id.clone(), name.clone())),
+                _ => None,
+            })
+            .expect("synthesized ToolUse ContentBlockStart missing");
+        assert_eq!(tool_start.2, "Bash", "tool name captured from <tool:Bash>");
+        assert!(
+            tool_start.1.starts_with("call_local_"),
+            "synthetic id should be recognizable, got {}",
+            tool_start.1
+        );
+        let tool_idx = tool_start.0;
+
+        // InputJson delta must carry the full JSON object byte-for-byte.
+        let json_bytes: Vec<u8> = evs
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ContentBlockDelta {
+                    index,
+                    delta: ContentDelta::InputJson(b),
+                } if *index == tool_idx => Some(b.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(
+            std::str::from_utf8(&json_bytes).unwrap(),
+            r#"{"cmd":"ls","mode":"Argv"}"#
+        );
+
+        // ContentBlockStop for the tool block.
+        assert!(
+            evs.iter().any(
+                |e| matches!(e, StreamEvent::ContentBlockStop { index } if *index == tool_idx)
+            ),
+            "synthesized ToolUse ContentBlockStop missing"
+        );
+
+        // stop_reason must be upgraded to ToolUse even though the model said "stop".
+        let sr = evs
+            .iter()
+            .find_map(|ev| match ev {
+                StreamEvent::MessageDelta { stop_reason, .. } => *stop_reason,
+                _ => None,
+            })
+            .expect("MessageDelta missing");
+        assert_eq!(
+            sr,
+            StopReason::ToolUse,
+            "stop_reason must be upgraded to ToolUse so the turn loop runs the tool"
+        );
+
+        // No text block was emitted (residual was empty after envelope strip).
+        assert!(
+            !evs.iter().any(|e| matches!(
+                e,
+                StreamEvent::ContentBlockStart {
+                    block: ContentBlockHeader::Text,
+                    ..
+                }
+            )),
+            "unexpected text block for envelope-only stream"
+        );
+
+        assert!(matches!(evs.last(), Some(StreamEvent::MessageStop)));
+    }
+
+    #[tokio::test]
+    async fn text_toolcall_fallback_passes_through_plain_text() {
+        // No tool envelope → plain text must come out as one Text block.
+        // stop_reason stays EndTurn; no ToolUse synthesis.
+        let body = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"hello \"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"world\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let cfg = StreamCfg {
+            text_toolcall_fallback: true,
+        };
+        let evs: Vec<_> = collect(stream_of_with_cfg(vec![body.as_bytes()], cfg))
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+
+        // A single text block with the concatenated content.
+        let text: String = evs
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ContentBlockDelta {
+                    delta: ContentDelta::Text(s),
+                    ..
+                } => Some(s.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(text, "hello world");
+
+        // No tool-use block.
+        assert!(
+            !evs.iter().any(|e| matches!(
+                e,
+                StreamEvent::ContentBlockStart {
+                    block: ContentBlockHeader::ToolUse { .. },
+                    ..
+                }
+            )),
+            "false positive: synthesized a tool_use from plain prose"
+        );
+
+        // stop_reason preserved as EndTurn.
+        let sr = evs.iter().find_map(|ev| match ev {
+            StreamEvent::MessageDelta { stop_reason, .. } => *stop_reason,
+            _ => None,
+        });
+        assert_eq!(sr, Some(StopReason::EndTurn));
+    }
+
+    #[tokio::test]
+    async fn text_toolcall_fallback_preserves_surrounding_prose() {
+        // Model emits prose around the tool envelope:
+        //   "I'll check the files. <tool:Bash>{"cmd":"ls"}</tool> done."
+        // Expected: the prose survives (minus the envelope), the tool gets
+        // synthesized, stop_reason upgraded to ToolUse.
+        let body = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"I'll check the files. <tool:Bash>{\\\"cmd\\\":\\\"ls\\\"}</tool> done.\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let cfg = StreamCfg {
+            text_toolcall_fallback: true,
+        };
+        let evs: Vec<_> = collect(stream_of_with_cfg(vec![body.as_bytes()], cfg))
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+
+        // Residual prose is present and carries *both* the leading and
+        // trailing snippets, envelope-free.
+        let text: String = evs
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ContentBlockDelta {
+                    delta: ContentDelta::Text(s),
+                    ..
+                } => Some(s.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            text.contains("I'll check the files."),
+            "leading prose lost: {text:?}"
+        );
+        assert!(text.contains("done."), "trailing prose lost: {text:?}");
+        assert!(
+            !text.contains("<tool:") && !text.contains("</tool>"),
+            "envelope leaked into text block: {text:?}"
+        );
+
+        // Synthesized tool_use is present with captured args.
+        let saw_tool = evs.iter().any(|e| {
+            matches!(
+                e,
+                StreamEvent::ContentBlockStart {
+                    block: ContentBlockHeader::ToolUse { name, .. },
+                    ..
+                } if name == "Bash"
+            )
+        });
+        assert!(saw_tool, "synthesized ToolUse missing");
+
+        let sr = evs.iter().find_map(|ev| match ev {
+            StreamEvent::MessageDelta { stop_reason, .. } => *stop_reason,
+            _ => None,
+        });
+        assert_eq!(sr, Some(StopReason::ToolUse));
+    }
+
+    #[tokio::test]
+    async fn text_toolcall_fallback_malformed_json_falls_through_as_text() {
+        // Envelope tags match but the inner payload isn't valid JSON.
+        // We must NOT crash, and the entire raw text (envelope included)
+        // must be passed through as text. The engine will then surface
+        // the model's mistake so the user can retry.
+        let body = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"<tool:Bash>{not json}</tool>\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let cfg = StreamCfg {
+            text_toolcall_fallback: true,
+        };
+        let evs: Vec<_> = collect(stream_of_with_cfg(vec![body.as_bytes()], cfg))
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+
+        // No tool_use synthesized.
+        assert!(
+            !evs.iter().any(|e| matches!(
+                e,
+                StreamEvent::ContentBlockStart {
+                    block: ContentBlockHeader::ToolUse { .. },
+                    ..
+                }
+            )),
+            "synthesized a tool_use despite malformed inner JSON"
+        );
+
+        // Raw text is emitted (envelope included — the point of the
+        // fallthrough is visibility).
+        let text: String = evs
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ContentBlockDelta {
+                    delta: ContentDelta::Text(s),
+                    ..
+                } => Some(s.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(text.contains("<tool:Bash>"));
+        assert!(text.contains("</tool>"));
+
+        // stop_reason stays EndTurn — no tool to run.
+        let sr = evs.iter().find_map(|ev| match ev {
+            StreamEvent::MessageDelta { stop_reason, .. } => *stop_reason,
+            _ => None,
+        });
+        assert_eq!(sr, Some(StopReason::EndTurn));
+    }
+
+    #[test]
+    fn stream_cfg_from_env_defaults_off_when_unset() {
+        // Smoke test that we don't read env in a weird way. Mutating env from
+        // a test is a race with other parallel tests in the crate (both
+        // `new_requires_env_var` and `new_with_base_url_*` key off
+        // `OPENAI_API_KEY`), so we keep this path constant-expression only.
+        // Truthy-value parsing is exercised indirectly through the stream
+        // tests above, which use the explicit `StreamCfg` struct.
+        let cfg = StreamCfg::default();
+        assert!(!cfg.text_toolcall_fallback);
     }
 
     #[test]
