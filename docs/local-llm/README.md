@@ -146,6 +146,148 @@ harness-local() {
 
 ---
 
+## 자주 겪는 문제 (troubleshooting)
+
+로컬 LLM 을 처음 붙일 때 반복해서 터지는 실패 모드들입니다. 증상 → 원인 →
+복붙 가능한 수정 순서로 정리했습니다.
+
+### 1. `tool_call.index missing` 비슷한 JSON 파싱 에러
+
+**증상**: harness 가 `ProviderError::Parse(...)` 로 죽으면서 메시지에
+`missing field index` 또는 `tool_calls[...].index` 가 들어감.
+
+**원인**: OpenAI 레퍼런스 서버는 `tool_calls[i]` 마다 `index: N` 을 항상
+실어주는데, **Ollama** 와 **llama.cpp (`--jinja` 템플릿 사용 시)** 는
+템플릿에 따라 생략하기도 합니다. harness 는 `index` 누락을 허용하고 배열
+내 위치로 폴백하지만, 런타임 버전이 구형이면 어쨌든 이 에러를 볼 수
+있습니다.
+
+**수정 순서**:
+
+1. 런타임 업데이트가 최우선 — 최근 Ollama / llama.cpp 는 이 필드를 제대로
+   내보냅니다.
+   ```bash
+   # Ollama
+   brew upgrade ollama   # or: curl -fsSL https://ollama.com/install.sh | sh
+   # llama.cpp
+   git -C llama.cpp pull && make -C llama.cpp -j
+   ```
+2. llama.cpp 는 `--jinja` 를 빼거나 다른 chat template 을 고르면 보통
+   해결됩니다.
+   ```bash
+   # 기본 내장 템플릿 사용 (jinja 파서 안 탐)
+   ./llama-server -m model.gguf --port 8080
+   # 아니면 다른 템플릿을 명시
+   ./llama-server -m model.gguf --chat-template llama3 --port 8080
+   ```
+3. 그래도 안 되면 모델을 바꾸세요 — Qwen2.5-Coder 계열이 툴콜 포맷이
+   가장 안정적입니다.
+
+### 2. Docker 안에서 `host.docker.internal` 쓸 때 키 에러
+
+**증상**: Docker 컨테이너에서 `--base-url http://host.docker.internal:11434/v1`
+로 호스트의 Ollama 를 찌르는데 `OPENAI_API_KEY not set` 가 뜸.
+
+**원인**: harness 의 `is_local_url` 은 **DNS 를 해석하지 않습니다** —
+loopback 판정은 `localhost` / `127.0.0.1` / `::1` 리터럴만 봅니다.
+`host.docker.internal` 은 호스트 쪽 Docker 가 돌려주는 네임이라서 harness
+입장에선 "어디로 연결될지 모르는 원격 도메인" 이라 안전 기본값으로 API
+key 를 요구합니다. (`openai.rs::is_local_url` 주석 참고)
+
+**수정**: placeholder 키를 넣어 주세요. 로컬 런타임은 값을 검증하지
+않습니다.
+
+```bash
+docker run --rm -it \
+  -e OPENAI_API_KEY=local \
+  -e OPENAI_BASE_URL=http://host.docker.internal:11434/v1 \
+  your-image harness ask "..."
+```
+
+같은 이유로 LAN 상의 다른 머신에 있는 Ollama 를 쓸 때도 — 예를 들어
+`http://192.168.1.50:11434/v1` — `OPENAI_API_KEY=local` 처럼 아무 값이나
+심어주면 됩니다.
+
+### 3. Ollama 응답이 500 또는 도중 끊김 (`num_ctx` 부족)
+
+**증상**: 짧은 프롬프트는 잘 되는데 툴 호출 몇 번 돌고 나면 Ollama 가
+500 을 돌려주거나 스트림이 중간에 끊김. 로그에 `context length exceeded`
+같은 문구.
+
+**원인**: Ollama 의 기본 `num_ctx` 는 **4096 토큰** 입니다. 여기에
+prompt + 예상 출력이 다 들어가야 해서, 조금만 대화가 길어지면 터집니다.
+harness 의 요청 기본 `max_tokens` 는 2048 로 맞춰져 있지만, prompt 가
+크면 여전히 터질 수 있습니다.
+
+**수정 — Modelfile 로 고정** (가장 깔끔):
+
+```bash
+# Modelfile
+cat > Modelfile <<'EOF'
+FROM qwen2.5-coder:7b
+PARAMETER num_ctx 16384
+EOF
+ollama create qwen25-16k -f Modelfile
+# 이후 --model openai/qwen25-16k 로 사용
+```
+
+**수정 — 환경변수로 전역**:
+
+```bash
+# 모든 모델 로드 시 num_ctx 기본값을 16384 로
+OLLAMA_CONTEXT_LENGTH=16384 ollama serve
+```
+
+컨텍스트를 늘리면 VRAM / RAM 사용량이 선형으로 증가합니다. 7B 모델 기준
+16K 면 대부분의 장비에서 안전, 32K 는 장비 따져봐야 함.
+
+### 4. llama.cpp `--jinja` 로 띄우면 툴콜 포맷이 달라짐
+
+**증상**: 같은 모델을 llama-server 로 띄웠을 때, `--jinja` 를 켜면 툴콜
+파서가 깨지거나, `--jinja` 를 끄면 툴을 아예 호출 안 함.
+
+**원인**: `--jinja` 는 HF 토크나이저의 chat_template 을 그대로 쓰라는
+지시인데, 모델 저자마다 `tools` 슬롯을 다르게 써둬서 llama.cpp 기본
+파서가 그 포맷을 제대로 복원하지 못하는 경우가 있습니다.
+
+**확인**: 파이프라인 한 번 돌려보기 — `harness ask "list files"` 가
+`Glob` 을 실제로 호출하는지.
+
+**수정**:
+
+- jinja 템플릿 쪽이 문제라면 `--jinja` 빼기:
+  ```bash
+  ./llama-server -m model.gguf --port 8080   # jinja 없이 내장 템플릿
+  ```
+- 반대로 기본 템플릿이 문제라면 특정 `--chat-template` 이름 명시:
+  ```bash
+  ./llama-server -m model.gguf --chat-template llama3 --port 8080
+  ./llama-server -m model.gguf --chat-template chatml --port 8080
+  ```
+- 위 둘 다 실패하면 모델을 바꾸세요. 7B 대 중엔 Qwen2.5-Coder 가 이 문제
+  적은 편.
+
+### 5. 뭐가 됐는지 모르겠을 때 — 두 줄 sanity probe
+
+```bash
+# (1) 서버가 살아있고 모델이 로드됐나
+curl -s http://localhost:11434/v1/models | jq .
+
+# (2) harness 가 어디로 쏘고 있나 (provider 초기화 로그 확인)
+RUST_LOG=harness_provider=info harness ask --model openai/qwen2.5-coder:7b \
+  --base-url http://localhost:11434/v1 "ping"
+```
+
+첫 줄에서 404 가 나오면 서버 자체가 안 붙었거나 포트가 틀린 것.
+두 번째 줄에서 나오는 `openai provider initialized base_url=... model=...`
+로그가 실제 송신 대상입니다. 예상과 다르면 `--base-url` / `OPENAI_BASE_URL`
+우선순위를 다시 확인하세요 (CLI 플래그 > env > 기본값).
+
+API 키는 **절대 로그에 찍히지 않습니다** — 유출 걱정 없이 `RUST_LOG=debug`
+까지 올려도 됩니다.
+
+---
+
 ## See also
 
 - 프로젝트 상위 문서: [`/README.md`](../../README.md) — harness 전반 개요,
