@@ -9,9 +9,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod redact;
+
 use std::path::{Path, PathBuf};
 
-use harness_proto::{Message, SessionId};
+use harness_proto::{ContentBlock, Message, SessionId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -103,8 +105,15 @@ pub async fn init(path: &Path, header: &SessionHeader) -> Result<(), MemError> {
 }
 
 /// Append one record (message or meta) under an advisory exclusive lock.
+///
+/// The record is passed through [`redact_record`] before serialization —
+/// pasted API keys / tokens are replaced with `[REDACTED:<kind>]` markers
+/// so they never land on disk. Redaction is idempotent; a clean record
+/// serializes byte-for-byte the same as before.
 pub async fn append(path: &Path, record: &Record) -> Result<(), MemError> {
-    let line = serde_json::to_string(record)?;
+    let mut redacted = record.clone();
+    redact_record(&mut redacted);
+    let line = serde_json::to_string(&redacted)?;
     let mut payload = line.into_bytes();
     payload.push(b'\n');
 
@@ -113,6 +122,43 @@ pub async fn append(path: &Path, record: &Record) -> Result<(), MemError> {
         .await
         .map_err(|e| MemError::Io(std::io::Error::other(e.to_string())))??;
     Ok(())
+}
+
+/// Walk a `Record` and apply [`redact::redact_str`] / [`redact::redact_value`]
+/// in place. Touches:
+///   - `Message.content`: `Text.text`, `ToolUse.input` (recursive), `ToolResult.content`
+///   - `Meta.detail`: recursive on the `serde_json::Value`
+///
+/// Keeping this a plain-`fn` on the mutable record (not a trait method on
+/// `harness-proto` types) avoids leaking the redaction dependency into the
+/// wire-protocol crate.
+pub fn redact_record(rec: &mut Record) {
+    match rec {
+        Record::Message(msg) => redact_message(msg),
+        Record::Meta(meta) => redact::redact_value(&mut meta.detail),
+    }
+}
+
+fn redact_message(msg: &mut Message) {
+    for block in &mut msg.content {
+        match block {
+            ContentBlock::Text { text, .. } => {
+                let red = redact::redact_str(text);
+                if red.as_str() != text.as_str() {
+                    *text = red;
+                }
+            }
+            ContentBlock::ToolUse { input, .. } => {
+                redact::redact_value(input);
+            }
+            ContentBlock::ToolResult { content, .. } => {
+                let red = redact::redact_str(content);
+                if red.as_str() != content.as_str() {
+                    *content = red;
+                }
+            }
+        }
+    }
 }
 
 fn append_locked(path: &Path, payload: &[u8]) -> Result<(), MemError> {
@@ -423,6 +469,101 @@ mod tests {
 
         let loaded = load(&path).await.unwrap();
         assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn append_redacts_secret_in_user_text() {
+        // A pasted API key in a user prompt must not land verbatim on disk.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let id = SessionId::new("s-redact");
+        let header = SessionHeader::new(id, "claude-opus-4-7");
+        init(&path, &header).await.unwrap();
+
+        let secret = "sk-ant-api03-abcdefghij1234567890XYZ";
+        let msg = Message::user(format!("here's my key {secret} please"));
+        append(&path, &Record::Message(msg)).await.unwrap();
+
+        let raw = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(!raw.contains(secret), "secret leaked to disk: {raw}");
+        assert!(raw.contains("[REDACTED:sk]"), "no marker: {raw}");
+    }
+
+    #[tokio::test]
+    async fn append_redacts_tool_use_input() {
+        // Secrets embedded in ToolUse input JSON get recursively scrubbed.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let id = SessionId::new("s-redact-tool");
+        let header = SessionHeader::new(id, "claude-opus-4-7");
+        init(&path, &header).await.unwrap();
+
+        let secret = "AKIAIOSFODNN7EXAMPLE";
+        let msg = Message {
+            role: harness_proto::Role::Assistant,
+            content: vec![harness_proto::ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({
+                    "command": format!("aws configure set aws_access_key_id {secret}"),
+                }),
+                cache_control: None,
+            }],
+            usage: None,
+        };
+        append(&path, &Record::Message(msg)).await.unwrap();
+
+        let raw = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(!raw.contains(secret), "secret leaked: {raw}");
+        assert!(raw.contains("[REDACTED:aws_akid]"));
+    }
+
+    #[tokio::test]
+    async fn append_redacts_meta_detail() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let id = SessionId::new("s-redact-meta");
+        let header = SessionHeader::new(id, "claude-opus-4-7");
+        init(&path, &header).await.unwrap();
+
+        let secret = "ghp_0123456789ABCDEFGHIJ0123456789abcdef";
+        append(
+            &path,
+            &Record::Meta(Meta {
+                event: "env_dump".into(),
+                detail: serde_json::json!({"GITHUB_TOKEN": secret, "nested": ["ok", secret]}),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let raw = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(!raw.contains(secret), "secret leaked in Meta: {raw}");
+        assert!(raw.contains("[REDACTED:github_pat]"));
+    }
+
+    /// Roundtrip: a clean record (no secrets) must write byte-for-byte
+    /// identically before and after redaction — guards against surprise
+    /// format drift in the common path.
+    #[tokio::test]
+    async fn append_clean_record_byte_stable() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.jsonl");
+        let b = dir.path().join("b.jsonl");
+        let id = SessionId::new("s-clean");
+        let header = SessionHeader::new(id, "claude-opus-4-7");
+        init(&a, &header).await.unwrap();
+        init(&b, &header).await.unwrap();
+
+        let msg = Message::user("plain prompt, nothing sensitive here");
+        append(&a, &Record::Message(msg.clone())).await.unwrap();
+
+        // Compare against the raw (non-redacted) serialization directly.
+        let want_line = serde_json::to_string(&Record::Message(msg)).unwrap();
+        let got_raw = tokio::fs::read_to_string(&a).await.unwrap();
+        // Line 2 is the message line (header is line 1).
+        let got_line = got_raw.lines().nth(1).unwrap();
+        assert_eq!(got_line, want_line);
     }
 
     #[tokio::test]

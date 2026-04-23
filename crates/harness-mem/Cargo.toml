@@ -18,6 +18,7 @@ harness-proto = { workspace = true }
 redb          = { workspace = true }
 fs4           = { workspace = true }
 etcetera      = { workspace = true }
+regex         = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
 chrono        = { workspace = true }
