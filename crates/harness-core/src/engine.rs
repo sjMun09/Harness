@@ -819,15 +819,33 @@ async fn dispatch_one(
         Decision::Deny => {
             return error_result(id, &format!("permission denied for {name}"));
         }
-        Decision::Ask => {
-            // Headless MVP: surface as error so the caller sees it.
-            return error_result(
-                id,
-                &format!(
-                    "permission requires user approval for {name}; configure settings.permissions.allow or run with --dangerously-skip-permissions"
-                ),
-            );
-        }
+        Decision::Ask => match ctx.ask_prompt.as_ref() {
+            Some(prompt) => match prompt.ask(name, &input) {
+                crate::tool::AskAnswer::Yes => {}
+                crate::tool::AskAnswer::Always => {
+                    ctx.permission.remember_always(name, &input);
+                }
+                crate::tool::AskAnswer::No => {
+                    return error_result(id, &format!("user denied {name}"));
+                }
+                crate::tool::AskAnswer::DontAsk => {
+                    return error_result(
+                        id,
+                        &format!(
+                            "user chose 'don't ask again'; denying {name} for the rest of the session"
+                        ),
+                    );
+                }
+            },
+            None => {
+                return error_result(
+                    id,
+                    &format!(
+                        "permission requires user approval for {name}; configure settings.permissions.allow or run with --dangerously-skip-permissions"
+                    ),
+                );
+            }
+        },
     }
 
     // Dispatch
@@ -934,6 +952,7 @@ mod tests {
             subagent: None,
             depth: 0,
             tx: None,
+            ask_prompt: None,
         }
     }
 

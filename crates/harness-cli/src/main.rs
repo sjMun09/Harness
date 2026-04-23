@@ -9,15 +9,9 @@ mod line_mode;
 mod logfile;
 mod metrics;
 mod models;
-// `prompt` module holds the TTY-driven `[y/n/a/d]` Ask flow. It's fully
-// unit-tested but NOT yet wired into the engine — `harness-core::engine`
-// calls `ctx.permission.evaluate` directly on the concrete
-// `PermissionSnapshot`, which means the Ask → prompt bridge needs a core
-// hook that this workstream is not allowed to add. See `prompt.rs` header
-// for the migration path.
-// TODO: need core hook — wire `prompt::ask_user` once `ToolCtx` exposes
-// an `Option<Box<dyn AskPrompt>>` field.
-#[allow(dead_code)]
+// `prompt` module holds the TTY-driven `[y/n/a/d]` Ask flow, wired into
+// the engine via `ToolCtx.ask_prompt` + `harness_core::AskPrompt` trait
+// (integration pass). `TtyAskPrompt` adapts `ask_user` to the trait.
 mod prompt;
 mod redact;
 mod subagent_host;
@@ -639,6 +633,7 @@ async fn run_session_core(run: SessionRun) -> anyhow::Result<SessionExit> {
     // PLAN §3.2 — per-turn cancel token wired to Ctrl-C. Shared with ToolCtx
     // so running tools see the same token fire.
     let cancel = CancellationToken::new();
+    let ask_prompt: Option<Arc<dyn harness_core::AskPrompt>> = Some(Arc::new(prompt::TtyAskPrompt));
     let ctx = ToolCtx {
         cwd,
         session_id: session_id.clone(),
@@ -648,6 +643,7 @@ async fn run_session_core(run: SessionRun) -> anyhow::Result<SessionExit> {
         subagent: subagent_host,
         depth: 0,
         tx: tx_handle,
+        ask_prompt: ask_prompt.clone(),
     };
 
     // Ctrl-C watcher. `done` is flipped when run_turn returns so the watcher
@@ -869,6 +865,7 @@ async fn run_session_tui(run: SessionRun) -> anyhow::Result<SessionExit> {
     )) as Arc<dyn SubagentHost>);
 
     let cancel = CancellationToken::new();
+    let ask_prompt: Option<Arc<dyn harness_core::AskPrompt>> = Some(Arc::new(prompt::TtyAskPrompt));
     let ctx = ToolCtx {
         cwd,
         session_id: session_id.clone(),
@@ -878,6 +875,7 @@ async fn run_session_tui(run: SessionRun) -> anyhow::Result<SessionExit> {
         subagent: subagent_host,
         depth: 0,
         tx: tx_handle,
+        ask_prompt: ask_prompt.clone(),
     };
 
     // Mirror line-mode's Ctrl-C watcher. The TUI also lets the user Esc/Ctrl-C

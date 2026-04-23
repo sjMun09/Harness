@@ -208,6 +208,7 @@ mod tests {
             subagent: host,
             depth,
             tx: None,
+            ask_prompt: None,
         }
     }
 

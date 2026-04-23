@@ -119,6 +119,7 @@ impl SubagentHost for CliSubagentHost {
             subagent: None, // depth-cap is also enforced structurally: no host → no spawn
             depth: spec.depth,
             tx: self.tx.clone(),
+            ask_prompt: None,
         };
 
         let initial = vec![Message::user(spec.prompt.clone())];

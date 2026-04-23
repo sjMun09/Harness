@@ -1,36 +1,12 @@
 //! Interactive `[y/n/a/d]` TTY prompt for `Decision::Ask` permission outcomes.
 //!
-//! # Status: partially integrated — blocked at the core boundary
-//!
-//! The engine (`harness-core::engine`) calls `ctx.permission.evaluate(...)`
-//! directly — `PermissionSnapshot` is a concrete struct, not a trait, and
-//! when `evaluate` returns `Decision::Ask` the engine immediately surfaces
-//! that as a `ToolResult` error (`engine.rs` around line 606):
-//!
-//! ```text
-//! Decision::Ask => {
-//!     // Headless MVP: surface as error so the caller sees it.
-//!     return error_result(id, &format!("permission requires user approval …"));
-//! }
-//! ```
-//!
-//! To inject the prompt flow below (`ask_user`) we would need one of:
-//!
-//! 1. Add an `Option<Box<dyn AskPrompt>>` to `ToolCtx`, consulted inside the
-//!    `Decision::Ask` arm, so the CLI can register this prompt for each
-//!    tool-use that trips Ask. ← Requires editing `harness-core`, which is
-//!    out of scope for this workstream.
-//! 2. Swap `PermissionSnapshot` for a trait + dyn — also `harness-core` and
-//!    `harness-perm` surface changes.
-//!
-//! Neither option is doable inside this workstream's file scope
-//! (crates/harness-cli only). The prompt module below is fully implemented
-//! and unit-tested so the wiring work is one diff away once the core hook
-//! lands; `main.rs` notes the TODO.
-//!
-//! TODO: need core hook — PLAN §5.8 iter-2. When it's available, wire
-//! `ask_user` into the engine's `Decision::Ask` branch via the new
-//! `ToolCtx` callback.
+//! Wired into the engine via `TtyAskPrompt` + `harness_core::AskPrompt`
+//! (see `ToolCtx.ask_prompt`). The engine consults the trait object inside
+//! the `Decision::Ask` arm; headless runs pass `None` and fall back to the
+//! non-interactive error path. `Yes/No/Always/DontAsk` map 1:1 to the
+//! `harness_core::AskAnswer` variants; `Always` persists via
+//! `PermissionSnapshot::remember_always`, `DontAsk` denies the single call
+//! with a distinctive error string.
 
 use std::io::{self, BufRead, IsTerminal, Write};
 
@@ -121,6 +97,24 @@ pub fn ask_user(tool: &str, input: &serde_json::Value) -> Result<AskAnswer, Stri
     let mut stderr_locked = stderr.lock();
     ask_user_inner(tool, input, &mut stderr_locked, &mut locked, 3)
         .map_err(|e| format!("prompt I/O error: {e}"))
+}
+
+/// `harness_core::AskPrompt` adapter for the CLI's TTY prompt. Used by
+/// `main.rs` to wire interactive permission approval into every `ToolCtx`.
+/// Non-TTY stdin falls back to `AskAnswer::No` so headless runs fail closed.
+#[derive(Debug, Default)]
+pub struct TtyAskPrompt;
+
+impl harness_core::AskPrompt for TtyAskPrompt {
+    fn ask(&self, tool: &str, input: &serde_json::Value) -> harness_core::AskAnswer {
+        match ask_user(tool, input) {
+            Ok(AskAnswer::Yes) => harness_core::AskAnswer::Yes,
+            Ok(AskAnswer::No) => harness_core::AskAnswer::No,
+            Ok(AskAnswer::Always) => harness_core::AskAnswer::Always,
+            Ok(AskAnswer::DontAsk) => harness_core::AskAnswer::DontAsk,
+            Err(_hint) => harness_core::AskAnswer::No,
+        }
+    }
 }
 
 /// Render a short summary of the JSON input for the prompt. Keeps the

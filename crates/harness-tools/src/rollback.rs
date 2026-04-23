@@ -134,6 +134,7 @@ mod tests {
             subagent: None,
             depth: 0,
             tx,
+            ask_prompt: None,
         }
     }
 

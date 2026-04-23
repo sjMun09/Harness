@@ -1275,7 +1275,6 @@ mod tests {
         let body = build_request_body(
             "gpt-4o",
             &StreamRequest {
-                model: "gpt-4o",
                 system: "",
                 messages: &msgs,
                 tools: &[],
@@ -1294,7 +1293,6 @@ mod tests {
         let body = build_request_body(
             "gpt-4o",
             &StreamRequest {
-                model: "gpt-4o",
                 system: "",
                 messages: &msgs,
                 tools: &[],
