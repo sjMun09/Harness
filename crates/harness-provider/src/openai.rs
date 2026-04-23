@@ -728,6 +728,20 @@ fn translate_chunk(
     Ok(out)
 }
 
+// TODO(local-llm): text-based tool-call fallback.
+// Many small local models (qwen2.5-coder:7b, gemma:7b) can't reliably emit
+// `tool_calls` JSON — they revert to natural language like
+// `I would run: Bash('ls')` or a `<tool>...</tool>` XML-ish envelope.
+// A minimal fallback would: at `flush_terminal`, if no tool_call blocks were
+// opened AND the text block matches a pattern like
+//   `<tool:(\w+)>\s*(\{[\s\S]*?\})\s*</tool>`
+// then synthesize a ContentBlockStart(ToolUse) + InputJson delta + Stop, and
+// elide the matching substring from the text block. Non-trivial because the
+// text block has already been streamed out as deltas; we'd need a buffering
+// mode for local providers only. Deferred until tasks 1-5 are in production
+// and we can validate the pattern against real model outputs rather than
+// guessing. See docs/local-llm/README.md "툴콜링" section.
+
 /// Called on `[DONE]` or on clean EOF after at least one chunk: emit
 /// `ContentBlockStop` for each open block, then `MessageDelta` + `MessageStop`.
 fn flush_terminal(state: &mut StreamState, queue: &mut VecDeque<StreamEvent>) {
