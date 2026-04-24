@@ -24,6 +24,7 @@ claude-code-oauth = []
 [dependencies]
 harness-proto = { workspace = true }
 harness-core  = { workspace = true }
+harness-mem   = { workspace = true }
 
 reqwest      = { workspace = true }
 tokio        = { workspace = true, features = ["rt", "macros", "sync", "time", "io-util"] }
@@ -40,6 +41,7 @@ backon    = { workspace = true }
 thiserror = { workspace = true }
 tracing   = { workspace = true }
 url       = { workspace = true }
+regex     = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

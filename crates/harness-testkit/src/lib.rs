@@ -32,7 +32,7 @@ use harness_core::{
     ContentBlockHeader, ContentDelta, EventStream, Provider, ProviderError, StreamEvent,
     StreamRequest, Tool,
 };
-use harness_proto::Usage;
+use harness_proto::{Message, Usage};
 use serde_json::Value;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
@@ -136,6 +136,75 @@ where
     S: Stream<Item = Result<StreamEvent, ProviderError>> + Send + 'static,
 {
     Box::pin(s) as Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send + 'static>>
+}
+
+/// Snapshot of what the engine sent on one `stream()` call: the system
+/// prompt and the full message history at that point in time. Cloned from
+/// the `StreamRequest` so callers can inspect it after the turn completes
+/// without borrowing.
+#[derive(Debug, Clone)]
+pub struct CallSnapshot {
+    pub system: String,
+    pub messages: Vec<Message>,
+}
+
+/// A `Provider` that delivers a scripted sequence of `StreamEvent`s (same
+/// shape as [`MockProvider::scripted`]) **and** records each inbound request
+/// so tests can assert what the engine sent.
+///
+/// Tests use [`RecordingProvider::new`] to build the provider + its shared
+/// log, then pass the `Arc<Self>` as the `Provider` and keep the log around
+/// to inspect after the turn loop completes.
+pub struct RecordingProvider {
+    script: Mutex<std::collections::VecDeque<Vec<StreamEvent>>>,
+    calls: Arc<Mutex<Vec<CallSnapshot>>>,
+}
+
+impl std::fmt::Debug for RecordingProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let calls_len = self.calls.lock().map(|v| v.len()).unwrap_or(0);
+        f.debug_struct("RecordingProvider")
+            .field("calls_recorded", &calls_len)
+            .finish()
+    }
+}
+
+impl RecordingProvider {
+    /// Build a recording provider. Returns the `Arc<Self>` (pluggable as
+    /// `Arc<dyn Provider>`) plus a shared log the caller reads after
+    /// `run_turn` returns.
+    pub fn new(events: Vec<Vec<StreamEvent>>) -> (Arc<Self>, Arc<Mutex<Vec<CallSnapshot>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let me = Arc::new(Self {
+            script: Mutex::new(events.into_iter().collect()),
+            calls: calls.clone(),
+        });
+        (me, calls)
+    }
+}
+
+#[async_trait]
+impl Provider for RecordingProvider {
+    async fn stream(&self, req: StreamRequest<'_>) -> Result<EventStream, ProviderError> {
+        {
+            let mut log = self
+                .calls
+                .lock()
+                .map_err(|_| ProviderError::Transport("recorder poisoned".into()))?;
+            log.push(CallSnapshot {
+                system: req.system.to_string(),
+                messages: req.messages.to_vec(),
+            });
+        }
+        let events = self
+            .script
+            .lock()
+            .map_err(|_| ProviderError::Transport("recorder script poisoned".into()))?
+            .pop_front()
+            .unwrap_or_default();
+        let s = stream::iter(events.into_iter().map(Ok::<_, ProviderError>));
+        Ok(pin_event_stream(s))
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────
