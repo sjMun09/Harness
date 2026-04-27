@@ -68,7 +68,7 @@ shlex         = "1"
 memmap2       = "0.9"
 
 # storage / tokenize / xdg
-redb        = "2"
+redb        = "4"
 fs4         = "1.0"
 etcetera    = "0.8"
 tiktoken-rs = "0.6"
